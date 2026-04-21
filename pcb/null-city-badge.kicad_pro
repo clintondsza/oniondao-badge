@@ -478,7 +478,7 @@
     "pinned_symbol_libs": []
   },
   "meta": {
-    "filename": "lanyard.kicad_pro",
+    "filename": "null-city-badge.kicad_pro",
     "version": 3
   },
   "net_settings": {
@@ -517,7 +517,7 @@
       "plot": "gerber/",
       "pos_files": "./",
       "specctra_dsn": "",
-      "step": "lanyard.step",
+      "step": "null-city-badge.step",
       "svg": "",
       "vrml": ""
     },
@@ -640,14 +640,6 @@
     [
       "96a9ebd7-4f87-4060-87a7-f00d27473ddc",
       "Root"
-    ],
-    [
-      "e4e3d2e8-6b1b-4202-aeb1-194a9c4f5f47",
-      "SD CARD MODULE"
-    ],
-    [
-      "8b66e526-c179-4bda-9ed5-284c54d75577",
-      "LORA MODULE"
     ],
     [
       "8c5168c8-f359-473b-9459-5b246b7098e5",
