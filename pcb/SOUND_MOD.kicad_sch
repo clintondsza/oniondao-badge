@@ -4032,17 +4032,17 @@
 		)
 	)
 	(symbol
-		(lib_id "power:VBUS")
-		(at 153.67 53.34 0)
+		(lib_id "power:GND")
+		(at 153.67 53.34 180)
 		(unit 1)
 		(exclude_from_sim no)
 		(in_bom yes)
 		(on_board yes)
 		(dnp no)
 		(fields_autoplaced yes)
-		(uuid "e17642fd-97e9-4ec7-ac73-85536553a0d9")
-		(property "Reference" "#PWR084"
-			(at 153.67 57.15 0)
+		(uuid "d18943f6-8ba6-43b8-8d81-660da554c2dd")
+		(property "Reference" "#PWR01"
+			(at 153.67 46.99 0)
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -4050,8 +4050,8 @@
 				(hide yes)
 			)
 		)
-		(property "Value" "VSYS_1"
-			(at 153.67 49.53 0)
+		(property "Value" "GND_1"
+			(at 153.67 48.26 0)
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -4076,7 +4076,7 @@
 				(hide yes)
 			)
 		)
-		(property "Description" "Power symbol creates a global label with name \"VBUS\""
+		(property "Description" "Power symbol creates a global label with name \"GND\" , ground"
 			(at 153.67 53.34 0)
 			(effects
 				(font
@@ -4086,12 +4086,12 @@
 			)
 		)
 		(pin "1"
-			(uuid "cc6bc3ca-2d58-47b6-bf68-7549310a227a")
+			(uuid "e055e46d-6d43-44e1-be51-471ddc1405d4")
 		)
 		(instances
-			(project "lanyard"
+			(project "null-city-badge"
 				(path "/96a9ebd7-4f87-4060-87a7-f00d27473ddc/8c5168c8-f359-473b-9459-5b246b7098e5"
-					(reference "#PWR084")
+					(reference "#PWR01")
 					(unit 1)
 				)
 			)
