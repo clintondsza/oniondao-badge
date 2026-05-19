@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="id">
+<html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -181,16 +181,16 @@
     <span class="pill pp">KiCad 9.0.3</span>
   </div>
   <h1>IO Interface Table<br><em>ESP32-S3-WROOM-1</em></h1>
-  <p class="hdr-sub">Pin mapping lengkap</p>
+  <p class="hdr-sub">Complete pin mapping</p>
   <div class="stats">
-    <div class="st"><span class="st-n">28</span><span class="st-l">GPIO Terpakai</span></div>
-    <div class="st"><span class="st-n">2</span><span class="st-l">Modul Fleksibel</span></div>
+    <div class="st"><span class="st-n">28</span><span class="st-l">GPIO Used</span></div>
+    <div class="st"><span class="st-n">2</span><span class="st-l">Flexible Modules</span></div>
   </div>
 </div>
 
 <div class="ctrl">
   <span class="fl">Filter:</span>
-  <button class="fb act" onclick="F('all',this)">Semua</button>
+  <button class="fb act" onclick="F('all',this)">All</button>
   <button class="fb" onclick="F('DISP',this)">Display</button>
   <button class="fb" onclick="F('I2C',this)">I²C</button>
   <button class="fb" onclick="F('UART',this)">UART</button>
@@ -198,7 +198,7 @@
   <button class="fb" onclick="F('SPI2',this)">CC1101</button>
   <button class="fb" onclick="F('GPIO',this)">GPIO / Misc</button>
   <div class="srch">
-    <input type="text" id="si" placeholder="Cari GPIO / net / peripheral..." oninput="S()">
+    <input type="text" id="si" placeholder="Search GPIO / net / peripheral..." oninput="S()">
   </div>
 </div>
 
@@ -214,7 +214,7 @@
   <span class="secchip" style="background:rgba(245,200,66,.1);color:#f5c842;border:1px solid rgba(245,200,66,.25)">CH340C · Boot Circuit</span>
 </div>
 <table>
-  <thead><tr><th>GPIO</th><th>Net</th><th>Arah</th><th>Interface</th><th>Peripheral</th><th>Fungsi & Keterangan</th></tr></thead>
+  <thead><tr><th>GPIO</th><th>Net</th><th>Direction</th><th>Interface</th><th>Peripheral</th><th>Function & Notes</th></tr></thead>
   <tbody>
     <tr data-g="UART GPIO">
       <td><span class="gpio gio">GPIO0</span></td>
@@ -222,7 +222,7 @@
       <td><span class="dir din">IN</span></td>
       <td><span class="if iboot">BOOT</span></td>
       <td class="peri"><b>BOOT Button</b> (SW_Push) + Auto-reset circuit Q1/Q2</td>
-      <td class="note"><span class="warn">⚠ STRAPPING PIN.</span> LOW saat power-on → mode download firmware. HIGH → normal boot. Jangan drive LOW saat startup.</td>
+      <td class="note"><span class="warn">⚠ STRAPPING PIN.</span> LOW at power-on → firmware download mode. HIGH → normal boot. Do not drive LOW at startup.</td>
     </tr>
     <tr data-g="UART">
       <td><span class="gpio gio">GPIO43</span></td>
@@ -230,7 +230,7 @@
       <td><span class="dir dout">OUT</span></td>
       <td><span class="if iuart">UART0 TX</span></td>
       <td class="peri"><b>U15</b> CH340C · RXD (pin 6)</td>
-      <td class="note">UART debug/programming TX. Terhubung ke CH340C via R1 220Ω.</td>
+      <td class="note">UART debug/programming TX. Connected to CH340C via R1 220Ω.</td>
     </tr>
     <tr data-g="UART">
       <td><span class="gpio gio">GPIO44</span></td>
@@ -246,7 +246,7 @@
       <td><span class="dir dout">OUT</span></td>
       <td><span class="if igpio">GPIO</span></td>
       <td class="peri"><b>Q5</b> SS8050 · R22 1kΩ → PWR rail</td>
-      <td class="note">Power control transistor. HIGH = aktifkan power ke peripheral. Gunakan sebelum mengakses peripheral yang power-gated.</td>
+      <td class="note">Power control transistor. HIGH = enable power to peripherals. Use before accessing power-gated peripherals.</td>
     </tr>
   </tbody>
 </table>
@@ -261,7 +261,7 @@
   <span class="secchip" style="background:rgba(45,230,138,.12);color:#2de68a;border:1px solid rgba(45,230,138,.25)">ATECC608B · TCA9534</span>
 </div>
 <table>
-  <thead><tr><th>GPIO</th><th>Net</th><th>Arah</th><th>Interface</th><th>Peripheral</th><th>Fungsi & Keterangan</th></tr></thead>
+  <thead><tr><th>GPIO</th><th>Net</th><th>Direction</th><th>Interface</th><th>Peripheral</th><th>Function & Notes</th></tr></thead>
   <tbody>
     <tr data-g="I2C">
       <td><span class="gpio gio">GPIO9</span></td>
@@ -269,7 +269,7 @@
       <td><span class="dir dout">OUT</span></td>
       <td><span class="if ii2c">I²C SCL</span></td>
       <td class="peri"><b>U10</b> TCA9534 · SCL (pin 14) + <b>U16</b> ATECC608B · SCL (pin 6)</td>
-      <td class="note">I²C Clock. Pull-up eksternal. Max 400kHz (Fast Mode).</td>
+      <td class="note">I²C Clock. External pull-up. Max 400kHz (Fast Mode).</td>
     </tr>
     <tr data-g="I2C">
       <td><span class="gpio gio">GPIO10</span></td>
@@ -285,7 +285,7 @@
       <td><span class="dir din">IN</span></td>
       <td><span class="if igpio">GPIO IRQ</span></td>
       <td class="peri"><b>U10</b> TCA9534 · INT (pin 13) → PB1–PB6 buttons</td>
-      <td class="note">IO Expander interrupt. Active LOW saat ada event tombol. Pasang <code>attachInterrupt(FALLING)</code>, lalu baca register TCA9534 via I²C.</td>
+      <td class="note">IO Expander interrupt. Active LOW on button event. Use <code>attachInterrupt(FALLING)</code>, then read the TCA9534 register via I²C.</td>
     </tr>
     <tr data-g="I2C GPIO">
       <td><span class="gpio gio">GPIO8</span></td>
@@ -293,7 +293,7 @@
       <td><span class="dir dout">OUT</span></td>
       <td><span class="if igpio">GPIO</span></td>
       <td class="peri"><b>U16</b> ATECC608B-SSHDA · Enable</td>
-      <td class="note">Secure Element enable. HIGH = aktif. Gunakan untuk power-gate ATECC608B saat tidak dipakai → hemat daya.</td>
+      <td class="note">Secure Element enable. HIGH = active. Use to power-gate ATECC608B when not in use → saves power.</td>
     </tr>
   </tbody>
 </table>
@@ -308,7 +308,7 @@
   <span class="secchip" style="background:rgba(157,112,240,.12);color:#9d70f0;border:1px solid rgba(157,112,240,.25)">E-Ink / TFT Display · GDR · RESE · BUSY · RS · DC · CS · SCK · SDI</span>
 </div>
 <table>
-  <thead><tr><th>GPIO</th><th>Net</th><th>Arah</th><th>Interface</th><th>J4 Pin</th><th>Fungsi & Keterangan</th></tr></thead>
+  <thead><tr><th>GPIO</th><th>Net</th><th>Direction</th><th>Interface</th><th>J4 Pin</th><th>Function & Notes</th></tr></thead>
   <tbody>
     <tr data-g="DISP">
       <td><span class="gpio gio">GPIO14</span></td>
@@ -316,7 +316,7 @@
       <td><span class="dir dout">OUT</span></td>
       <td><span class="if idisp">DISP RST</span></td>
       <td class="peri">J4 · pin 3 (RESET)</td>
-      <td class="note">Display hardware reset. LOW = reset aktif. Pulsa LOW min 10ms saat inisialisasi.</td>
+      <td class="note">Display hardware reset. LOW = reset active. Pulse LOW min 10ms during initialization.</td>
     </tr>
     <tr data-g="DISP">
       <td><span class="gpio gio">GPIO13</span></td>
@@ -324,7 +324,7 @@
       <td><span class="dir dout">OUT</span></td>
       <td><span class="if idisp">DISP D/C</span></td>
       <td class="peri">J4 · pin 11 (DC)</td>
-      <td class="note">Data/Command select. HIGH = Data, LOW = Command. Wajib di-toggle setiap kirim.</td>
+      <td class="note">Data/Command select. HIGH = Data, LOW = Command. Must be toggled on every transfer.</td>
     </tr>
     <tr data-g="DISP">
       <td><span class="gpio gio">GPIO12</span></td>
@@ -348,7 +348,7 @@
       <td><span class="dir din">IN</span></td>
       <td><span class="if idisp">DISP BUSY</span></td>
       <td class="peri">J4 · pin 9 (BUSY)</td>
-      <td class="note">Display busy signal. HIGH = display sedang refresh. Poll atau interrupt sebelum kirim data baru.</td>
+      <td class="note">Display busy signal. HIGH = display is refreshing. Poll or interrupt before sending new data.</td>
     </tr>
     <tr data-g="DISP">
       <td><span class="gpio gio">GPIO17</span></td>
@@ -356,7 +356,7 @@
       <td><span class="dir dout">OUT</span></td>
       <td><span class="if idisp">DISP MOSI</span></td>
       <td class="peri">J4 · pin 23 (SDI)</td>
-      <td class="note">Display SPI MOSI — data ke display.</td>
+      <td class="note">Display SPI MOSI — data to display.</td>
     </tr>
   </tbody>
 </table>
@@ -371,7 +371,7 @@
   <span class="secchip" style="background:rgba(40,212,200,.12);color:#28d4c8;border:1px solid rgba(40,212,200,.25)">Sound Module I²S / PDM</span>
 </div>
 <table>
-  <thead><tr><th>IO L1</th><th>IO L2</th><th>IO R</th><th>Arah</th><th>Interface</th><th>Fungsi & Keterangan</th></tr></thead>
+  <thead><tr><th>IO L1</th><th>IO L2</th><th>IO R</th><th>Direction</th><th>Interface</th><th>Function & Notes</th></tr></thead>
   <tbody>
     <tr data-g="SPI1">
       <td><span class="gpio gio">G48</span></td>
@@ -387,7 +387,7 @@
       <td><span class="gpio gio">G39</span></td>
       <td><span class="dir dout">OUT</span></td>
       <td><span class="if ii2s">I²S / PDM</span></td>
-      <td class="note">I²S Bit Clock ke NS4168 + SPH0641 saat Sound Module.</td>
+      <td class="note">I²S Bit Clock to NS4168 + SPH0641 in Sound Module mode.</td>
     </tr>
     <tr data-g="SPI1">
       <td><span class="gpio gio">G19</span></td>
@@ -395,7 +395,7 @@
       <td><span class="gpio gio">G16</span></td>
       <td><span class="dir dout">OUT</span></td>
       <td><span class="if ii2s">I²S WS / LR</span></td>
-      <td class="note">I²S Word Select (LRCK) ke NS4168 + SPH0641 SELECT saat Sound Module.</td>
+      <td class="note">I²S Word Select (LRCK) to NS4168 + SPH0641 SELECT in Sound Module mode.</td>
     </tr>
     <tr data-g="SPI1">
       <td><span class="gpio gio">G42</span></td>
@@ -403,7 +403,7 @@
       <td><span class="gpio gio">G15</span></td>
       <td><span class="dir dout">OUT</span></td>
       <td><span class="if ii2s">I²S SDO</span></td>
-      <td class="note">I²S audio data ke NS4168 (SD pin) saat Sound Module.</td>
+      <td class="note">I²S audio data to NS4168 (SD pin) in Sound Module mode.</td>
     </tr>
     <tr data-g="SPI1">
       <td><span class="gpio gio">G41</span></td>
@@ -411,7 +411,7 @@
       <td><span class="gpio gio">G07</span></td>
       <td><span class="dir dout">OUT</span></td>
       <td><span class="if ii2s">I²S CTRL</span></td>
-      <td class="note">I²S Control ke NS4168 (CTRL pin) saat Sound Module.</td>
+      <td class="note">I²S Control to NS4168 (CTRL pin) in Sound Module mode.</td>
     </tr>
   </tbody>
 </table>
@@ -427,7 +427,7 @@
   <span class="secchip" style="background:rgba(240,120,64,.12);color:#f07840;border:1px solid rgba(240,120,64,.25)">CC1101 RGP</span>
 </div>
 <table>
-  <thead><tr><th>IO L1</th><th>IO L2</th><th>IO R</th><th>Arah</th><th>Interface</th><th>Fungsi & Keterangan</th></tr></thead>
+  <thead><tr><th>IO L1</th><th>IO L2</th><th>IO R</th><th>Direction</th><th>Interface</th><th>Function & Notes</th></tr></thead>
   <tbody>
     <tr data-g="SPI2">
       <td><span class="gpio gio">G48</span></td>
@@ -435,7 +435,7 @@
       <td><span class="gpio gio">G38</span></td>
       <td><span class="dir dio">I/O</span></td>
       <td><span class="if ispi">SPI MOSI</span></td>
-      <td class="note">C1101 mode: SPI MOSI ke CC1101.</td>
+      <td class="note">CC1101 mode: SPI MOSI to CC1101.</td>
     </tr>
     <tr data-g="SPI2">
       <td><span class="gpio gio">G47</span></td>
@@ -467,7 +467,7 @@
       <td><span class="gpio gio">G07</span></td>
       <td><span class="dir din">IN</span></td>
       <td><span class="if igpio">GPIO IRQ</span></td>
-      <td class="note">GDO0 output CC1101 dikonfigurasi via register.</td>
+      <td class="note">GDO0 output CC1101 configured via register.</td>
     </tr>
     </tbody>
 </table>
@@ -477,7 +477,7 @@
 ════════════════════════════════════ -->
 <div class="sec" style="margin-top:36px;">
   <div class="secdot" style="background:#9d70f0"></div>
-  <span class="sect">Referensi Connector — Pinout Lengkap</span>
+  <span class="sect">Connector Reference — Complete Pinout</span>
 </div>
 
 <div class="conn-grid">
