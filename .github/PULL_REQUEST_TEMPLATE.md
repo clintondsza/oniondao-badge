@@ -17,7 +17,7 @@
 
 ## Hardware requirements
 
-- **Module variant needed:** <!-- CC1101 / Sound / SD / LoRa / none -->
+- **Module variant needed:** <!-- CC1101 / Sound / none -->
 - **GPIOs touched:** <!-- list using the names from docs/PINOUT.md -->
 - **Conflicts with other modules?** <!-- yes/no, explain -->
 

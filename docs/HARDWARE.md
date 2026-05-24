@@ -2,7 +2,7 @@
 
 Deep dive on every subsystem on the NULL City Badge. Pair this with
 [`PINOUT.md`](PINOUT.md) (where every GPIO lives) and
-[`MODULES.md`](MODULES.md) (what the swappable RF / audio / SD modules do).
+[`MODULES.md`](MODULES.md) (what the swappable RF / audio modules do).
 
 ---
 

@@ -8,8 +8,6 @@ module live next to the main board:
 |--------|-----------|--------------|
 | **CC1101 Sub-GHz** | [`pcb/CC1101_MOD.kicad_sch`](../pcb/CC1101_MOD.kicad_sch) | 315 / 433 / 868 / 915 MHz SPI radio |
 | **Sound (I²S + PDM)** | [`pcb/SOUND_MOD.kicad_sch`](../pcb/SOUND_MOD.kicad_sch) | NS4168 Class-D amp + SPH0641 PDM mic |
-| **SD Card** | [`pcb/SDCARD_MOD.kicad_sch`](../pcb/SDCARD_MOD.kicad_sch) | microSD slot (SPI / SDIO) |
-| **LoRa** | [`pcb/LORA_MOD.kicad_sch`](../pcb/LORA_MOD.kicad_sch) | SX1276-style long-range radio |
 
 Per-variant BOMs are in [`pcb/production/`](../pcb/production/) (e.g.
 `bom-list_cc1101.xlsx`, `bom-list_sound.xlsx`).
@@ -99,18 +97,6 @@ i2s_std_config_t std_cfg = {
 ```
 
 For PDM-mic capture, swap the std_cfg for `i2s_pdm_rx_config_t`.
-
-## SD Card Module
-
-- microSD slot on a separate module — see `SDCARD_MOD.kicad_sch`.
-- Wiring is variant-specific; check the schematic for which side-port
-  GPIOs it uses on your build. Typically SPI mode (CS, SCK, MOSI, MISO).
-
-## LoRa Module
-
-- SX1276-class long-range radio (sub-GHz). Variant-specific antenna and
-  matching network.
-- SPI bus + DIO interrupt + reset line — see `LORA_MOD.kicad_sch`.
 
 ## Authoring a new module
 

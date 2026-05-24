@@ -38,7 +38,6 @@ outputs, STEP model) lives in [`pcb/`](pcb). The software lives in
 | **Display** | 24-pin socket (`J4`) — E-Ink / TFT SPI with `BUSY`, `RST`, `DC`, `CS`, `SCK`, `MOSI` |
 | **Audio (mod)** | NS4168 I²S amplifier + SPH0641 PDM mic (Sound Module) |
 | **Sub-GHz (mod)** | TI **CC1101** SPI radio (315/433/868/915 MHz) |
-| **Other mods** | SD Card module, LoRa module (separate `*_MOD.kicad_sch` files) |
 | **Expansion** | Left port `J8` (10 pin) + Right port `J10` (10 pin) — VCC / GND + GPIO |
 | **GPIO Used** | 28 of the available ESP32-S3 GPIOs |
 | **Power Gate** | Q5 (SS8050) on `GPIO18` enables the peripheral `PWR` rail |
@@ -77,8 +76,6 @@ oniondao-badge/
 │   ├── null-city-badge.kicad_pcb         (board layout)
 │   ├── CC1101_MOD.kicad_sch              (Sub-GHz RF module)
 │   ├── SOUND_MOD.kicad_sch               (I²S amp + PDM mic)
-│   ├── SDCARD_MOD.kicad_sch              (SD card module)
-│   ├── LORA_MOD.kicad_sch                (LoRa module)
 │   ├── null-city-badge.step              (full 3D model)
 │   ├── 3d/                               (additional STEP assets)
 │   ├── production/                       (gerbers, BOMs, netlist)
@@ -111,7 +108,7 @@ The docs are split so you can read just what you need:
 - **[docs/PINOUT.md](docs/PINOUT.md)** — the complete GPIO map: every used
   pin, its net, direction, interface, and the peripheral it connects to.
 - **[docs/MODULES.md](docs/MODULES.md)** — the swappable modules
-  (CC1101 / Sound / SD Card / LoRa) and the shared-GPIO assignments. Read
+  (CC1101 / Sound) and the shared-GPIO assignments. Read
   this **first** if you are writing firmware that touches the side ports.
 
 ### Manufacturing

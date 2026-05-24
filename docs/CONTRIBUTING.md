@@ -31,7 +31,7 @@ software/<bucket>/<your-thing>/
 Your `README.md` should answer, at the top:
 
 1. **What does this do?** (one paragraph)
-2. **Which module variant does it need?** (CC1101 / Sound / SD / LoRa / none)
+2. **Which module variant does it need?** (CC1101 / Sound / none)
 3. **Which GPIOs does it touch?** Reference the names in
    [`docs/PINOUT.md`](PINOUT.md) — don't re-invent numbering.
 4. **How do I build & flash?** Toolchain + command lines.
@@ -49,7 +49,7 @@ Your `README.md` should answer, at the top:
   recovery in your README.
 - **Power-gate awareness.** If your mod needs `PWR`, assert `GPIO18`
   HIGH during setup and (ideally) drop it on deep sleep.
-- **Authorisation matters for RF.** CC1101 / LoRa replay or jamming
+- **Authorisation matters for RF.** CC1101 replay or jamming
   firmware is fine to share for research / testing on your own equipment.
   Don't ship anything that targets other people's systems without their
   consent. Your contribution, your responsibility.
