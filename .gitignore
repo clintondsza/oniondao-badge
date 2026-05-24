@@ -2,6 +2,9 @@
 pcb/fp-info-cache
 null-city-badge-backups/*
 
+# macOS
+.DS_Store
+
 # Temporary files
 *.000
 *.bak
