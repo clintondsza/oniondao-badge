@@ -43,16 +43,30 @@ static uint32_t s_last_activity;
 static uint8_t img_buf[IMG_SIZE];
 
 // ── ESPNow ────────────────────────────────────────────────────────────────────
+enum MsgType : uint8_t { MSG_BEACON, MSG_PING, MSG_PONG, MSG_TEXT };
+
 struct BeaconMsg {
+    MsgType  type;
     char     name[16];
     uint8_t  mac[6];
     uint32_t counter;
+    char     text[32];
+};
+
+struct PeerEntry {
+    uint8_t  mac[6];
+    char     name[16];
+    int8_t   rssi;
+    uint32_t last_seen;
 };
 
 static volatile bool g_recv_flag  = false;
 static BeaconMsg     g_last_recv  = {};
 static uint32_t      g_send_count = 0;
 static bool          g_espnow_up  = false;
+static char          g_callsign[16] = {};
+static PeerEntry     g_peers[10]  = {};
+static int           g_peer_count = 0;
 
 // ── App state ─────────────────────────────────────────────────────────────────
 enum AppState {
@@ -794,25 +808,83 @@ static void draw_guide() {
 
 // ── ESPNow logic ──────────────────────────────────────────────────────────────
 
+static void make_default_callsign(char* out, size_t len) {
+    uint8_t mac[6];
+    WiFi.macAddress(mac);
+    snprintf(out, len, "NCB-%02X%02X%02X", mac[3], mac[4], mac[5]);
+}
+
+static void upsert_peer(const uint8_t* mac, const BeaconMsg& msg, int8_t rssi) {
+    for (int i = 0; i < g_peer_count; i++) {
+        if (memcmp(g_peers[i].mac, mac, 6) == 0) {
+            memcpy(g_peers[i].name, msg.name, sizeof(g_peers[i].name));
+            g_peers[i].rssi      = rssi;
+            g_peers[i].last_seen = millis();
+            return;
+        }
+    }
+    if (g_peer_count < 10) {
+        memcpy(g_peers[g_peer_count].mac,  mac,      6);
+        memcpy(g_peers[g_peer_count].name, msg.name, sizeof(g_peers[0].name));
+        g_peers[g_peer_count].rssi      = rssi;
+        g_peers[g_peer_count].last_seen = millis();
+        g_peer_count++;
+    }
+}
+
 static void on_recv(const uint8_t* mac, const uint8_t* data, int len) {
     if ((size_t)len == sizeof(BeaconMsg)) {
-        memcpy((void*)&g_last_recv, data, sizeof(BeaconMsg));
+        BeaconMsg msg;
+        memcpy(&msg, data, sizeof(BeaconMsg));
+        upsert_peer(mac, msg, -50);  // RSSI placeholder; framework doesn't expose it in this callback
+        memcpy((void*)&g_last_recv, &msg, sizeof(BeaconMsg));
         g_recv_flag = true;
+        Serial.printf("[espnow] recv from %s (%02X:%02X:%02X:%02X:%02X:%02X) #%u\n",
+            msg.name, mac[0], mac[1], mac[2], mac[3], mac[4], mac[5], msg.counter);
     }
 }
 
 static void send_beacon() {
     BeaconMsg msg = {};
-    snprintf(msg.name, sizeof(msg.name), "NULL-CITY");
+    msg.type = MSG_BEACON;
+    strncpy(msg.name, g_callsign, sizeof(msg.name));
     WiFi.macAddress(msg.mac);
     msg.counter = ++g_send_count;
     uint8_t broadcast[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
     esp_now_send(broadcast, (uint8_t*)&msg, sizeof(msg));
-    Serial.printf("[espnow] sent beacon #%u\n", msg.counter);
+    Serial.printf("[espnow] sent beacon #%u as %s\n", msg.counter, g_callsign);
+}
+
+static void shutdown_espnow() {
+    if (!g_espnow_up) return;
+    esp_now_deinit();
+    WiFi.mode(WIFI_OFF);
+    g_espnow_up  = false;
+    g_peer_count = 0;
+    g_send_count = 0;
+    memset((void*)&g_last_recv, 0, sizeof(g_last_recv));
+    Serial.println("[espnow] shut down");
 }
 
 static void init_espnow() {
     if (g_espnow_up) return;
+
+    // Load or generate callsign
+    {
+        Preferences prefs;
+        prefs.begin("badge", false);
+        String cs = prefs.getString("callsign", "");
+        if (cs.length() == 0) {
+            WiFi.mode(WIFI_STA);  // needed to read MAC before esp_now_init
+            make_default_callsign(g_callsign, sizeof(g_callsign));
+            prefs.putString("callsign", g_callsign);
+            Serial.printf("[espnow] generated callsign: %s\n", g_callsign);
+        } else {
+            strncpy(g_callsign, cs.c_str(), sizeof(g_callsign));
+        }
+        prefs.end();
+    }
+
     WiFi.mode(WIFI_STA);
     WiFi.disconnect();
     if (esp_now_init() != ESP_OK) {
@@ -828,7 +900,7 @@ static void init_espnow() {
     esp_now_add_peer(&peer);
 
     g_espnow_up = true;
-    Serial.println("[espnow] ready");
+    Serial.printf("[espnow] ready as %s\n", g_callsign);
 }
 
 // ── Draw: ESPNow beacon ───────────────────────────────────────────────────────
@@ -841,23 +913,24 @@ static void draw_espnow() {
         display.setFont(&FreeMono9pt7b);
         display.setTextColor(GxEPD_BLACK);
 
-        // Own MAC
-        char own_mac[18];
-        snprintf(own_mac, sizeof(own_mac), "%s", WiFi.macAddress().c_str());
-        char buf[32];
-        snprintf(buf, sizeof(buf), "Own: %s", own_mac);
+        // Own identity
+        char buf[36];
+        snprintf(buf, sizeof(buf), "Me: %s", g_callsign);
         display.setCursor(8, 50);
         display.print(buf);
 
-        snprintf(buf, sizeof(buf), "Sent: %u", g_send_count);
-        display.setCursor(8, 68);
+        snprintf(buf, sizeof(buf), "MAC: %s", WiFi.macAddress().c_str());
+        display.setCursor(8, 66);
         display.print(buf);
 
-        // Divider
-        display.drawFastHLine(8, 78, display.width() - 16, GxEPD_BLACK);
+        snprintf(buf, sizeof(buf), "Sent: %-4u  Peers: %d", g_send_count, g_peer_count);
+        display.setCursor(8, 82);
+        display.print(buf);
+
+        display.drawFastHLine(8, 90, display.width() - 16, GxEPD_BLACK);
 
         // Last received
-        display.setCursor(8, 96);
+        display.setCursor(8, 106);
         display.print("Last recv:");
 
         if (g_last_recv.mac[0] || g_last_recv.mac[1] || g_last_recv.mac[2]) {
@@ -866,15 +939,12 @@ static void draw_espnow() {
                 "%02X:%02X:%02X:%02X:%02X:%02X",
                 g_last_recv.mac[0], g_last_recv.mac[1], g_last_recv.mac[2],
                 g_last_recv.mac[3], g_last_recv.mac[4], g_last_recv.mac[5]);
-            display.setCursor(8, 114);
+            display.setCursor(8, 122);
             display.print(g_last_recv.name);
-            display.setCursor(8, 132);
+            display.setCursor(8, 138);
             display.print(peer_mac);
-            snprintf(buf, sizeof(buf), "Count: %u", g_last_recv.counter);
-            display.setCursor(8, 142);
-            display.print(buf);
         } else {
-            display.setCursor(8, 114);
+            display.setCursor(8, 122);
             display.print("(none yet)");
         }
 
@@ -979,7 +1049,7 @@ static void handle_buttons(uint8_t pressed) {
 
         case STATE_ESPNOW:
             if (pressed & BTN_SELECT) { send_beacon(); g_needs_redraw = true; }
-            if (pressed & BTN_CANCEL) { g_state = STATE_MENU; g_needs_redraw = true; }
+            if (pressed & BTN_CANCEL) { shutdown_espnow(); g_state = STATE_MENU; g_needs_redraw = true; }
             break;
 
         default:
