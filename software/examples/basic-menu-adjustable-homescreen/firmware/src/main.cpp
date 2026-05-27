@@ -12,6 +12,7 @@
 
 #include <WiFi.h>
 #include <esp_now.h>
+#include <esp_wifi.h>
 
 #include "badge_pins.h"
 
@@ -865,12 +866,32 @@ static void upsert_peer(const uint8_t* mac, const BeaconMsg& msg, int8_t rssi) {
     }
 }
 
+// Shared group keys — all badges must use the same values
+static const uint8_t ESPNOW_PMK[] = "NullCity-Badge-1";  // 17 bytes; esp_now_set_pmk reads first 16
+static const uint8_t ESPNOW_LMK[] = "Badge-LinkKey-01";  // 17 bytes; LMK uses first 16
+
+// Promiscuous callback — captures RSSI for packets from known peers
+static void on_promisc(void* buf, wifi_promiscuous_pkt_type_t type) {
+    if (type != WIFI_PKT_MGMT) return;
+    const wifi_promiscuous_pkt_t* pkt = (wifi_promiscuous_pkt_t*)buf;
+    int8_t rssi = pkt->rx_ctrl.rssi;
+    // Source MAC sits at byte offset 10 in 802.11 management frames
+    const uint8_t* src_mac = pkt->payload + 10;
+    for (int i = 0; i < g_peer_count; i++) {
+        if (memcmp(g_peers[i].mac, src_mac, 6) == 0) {
+            g_peers[i].rssi = rssi;
+            break;
+        }
+    }
+}
+
 static void ensure_unicast_peer(const uint8_t* mac) {
     if (!esp_now_is_peer_exist(mac)) {
         esp_now_peer_info_t peer = {};
         memcpy(peer.peer_addr, mac, 6);
         peer.channel = 0;
-        peer.encrypt = false;
+        peer.encrypt = true;
+        memcpy(peer.lmk, ESPNOW_LMK, 16);
         esp_now_add_peer(&peer);
     }
 }
@@ -924,6 +945,7 @@ static void send_beacon() {
 
 static void shutdown_espnow() {
     if (!g_espnow_up) return;
+    esp_wifi_set_promiscuous(false);
     esp_now_deinit();
     WiFi.mode(WIFI_OFF);
     g_espnow_up       = false;
@@ -968,15 +990,21 @@ static void init_espnow() {
         return;
     }
     esp_now_register_recv_cb(on_recv);
+    esp_now_set_pmk(ESPNOW_PMK);
 
+    // Broadcast peer — unencrypted (encryption not supported for broadcast)
     esp_now_peer_info_t peer = {};
     memset(peer.peer_addr, 0xFF, 6);
     peer.channel = 0;
     peer.encrypt = false;
     esp_now_add_peer(&peer);
 
+    // Enable promiscuous mode to capture RSSI
+    esp_wifi_set_promiscuous(true);
+    esp_wifi_set_promiscuous_rx_cb(on_promisc);
+
     g_espnow_up = true;
-    Serial.printf("[espnow] ready as %s\n", g_callsign);
+    Serial.printf("[espnow] ready as %s (encrypted unicast)\n", g_callsign);
 }
 
 // ── Draw: ESPNow sub-screens ──────────────────────────────────────────────────
@@ -1077,37 +1105,64 @@ static void draw_espnow_peers() {
             display.setCursor(8, 86);
             display.print("press SEL to beacon.");
         } else {
-            // Show up to 4 peers, scrollable
-            int visible = min(g_peer_count, 4);
+            // 3 peers visible per screen, each slot is 40px tall
+            int visible = min(g_peer_count, 3);
             int start   = min(g_peers_cursor, max(0, g_peer_count - visible));
             for (int i = 0; i < visible; i++) {
                 int idx = start + i;
                 if (idx >= g_peer_count) break;
-                int y = 34 + i * 30;
 
+                int y_slot = 22 + i * 40;
+                int y_name = y_slot + 14;
+                int y_bar  = y_slot + 20;
+                int y_tier = y_slot + 34;
+
+                if (i > 0)
+                    display.drawFastHLine(0, y_slot, display.width(), GxEPD_BLACK);
+
+                // Selection highlight on name row
                 if (idx == g_peers_cursor) {
-                    display.fillRect(0, y - 14, display.width(), 16, GxEPD_BLACK);
+                    display.fillRect(0, y_name - 12, display.width(), 15, GxEPD_BLACK);
                     display.setTextColor(GxEPD_WHITE);
                 } else {
                     display.setTextColor(GxEPD_BLACK);
                 }
 
-                char buf[32];
-                snprintf(buf, sizeof(buf), "%-12s", g_peers[idx].name);
-                display.setCursor(8, y);
-                display.print(buf);
+                // Callsign
+                display.setCursor(8, y_name);
+                display.print(g_peers[idx].name);
+
+                // [E] encryption indicator (right-aligned, same color as name)
+                esp_now_peer_info_t pi = {};
+                if (esp_now_get_peer(g_peers[idx].mac, &pi) == ESP_OK && pi.encrypt) {
+                    display.setCursor(227, y_name);
+                    display.print("[E]");
+                }
 
                 display.setTextColor(GxEPD_BLACK);
-                char mac_buf[18];
-                snprintf(mac_buf, sizeof(mac_buf), "%02X:%02X:%02X:%02X:%02X:%02X",
-                    g_peers[idx].mac[0], g_peers[idx].mac[1], g_peers[idx].mac[2],
-                    g_peers[idx].mac[3], g_peers[idx].mac[4], g_peers[idx].mac[5]);
-                display.setCursor(8, y + 14);
-                display.print(mac_buf);
+
+                // RSSI bar: 8 blocks × 6px wide × 10px tall, 1px gap between blocks
+                // Formula: -90 dBm → 0 blocks, -30 dBm → 8 blocks
+                int8_t rssi = g_peers[idx].rssi;
+                int blocks = max(0, min(8, ((int)rssi + 90) * 8 / 60));
+                for (int b = 0; b < 8; b++) {
+                    int bx = 8 + b * 7;
+                    if (b < blocks)
+                        display.fillRect(bx, y_bar, 6, 10, GxEPD_BLACK);
+                    else
+                        display.drawRect(bx, y_bar, 6, 10, GxEPD_BLACK);
+                }
+
+                // Proximity tier + dBm value
+                const char* tier = rssi > -50 ? "CLOSE" : rssi > -70 ? "NEAR " : "FAR  ";
+                char tbuf[20];
+                snprintf(tbuf, sizeof(tbuf), " %s %ddBm", tier, (int)rssi);
+                display.setCursor(66, y_tier);
+                display.print(tbuf);
             }
         }
 
-        page_footer("UP/DN:scroll LFT/RGT:tab CXL:back");
+        page_footer("SEL:target UP/DN:scroll LFT/RGT:tab");
     } while (display.nextPage());
     display.hibernate();
 }
