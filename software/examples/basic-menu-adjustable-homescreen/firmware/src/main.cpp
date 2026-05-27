@@ -47,7 +47,7 @@ static uint32_t s_last_activity;
 static uint8_t img_buf[IMG_SIZE];
 
 // ── ESPNow ────────────────────────────────────────────────────────────────────
-enum MsgType : uint8_t { MSG_BEACON, MSG_PING, MSG_PONG, MSG_TEXT };
+enum MsgType : uint8_t { MSG_BEACON, MSG_PING, MSG_PONG, MSG_TEXT, MSG_CHALLENGE, MSG_CAP_TOKEN };
 
 // Fields up to (but not including) pubkey are covered by the ECDSA signature
 static const size_t BEACON_SIGN_LEN = 1 + 16 + 6 + 4 + 32;  // type+name+mac+counter+text = 59 bytes
@@ -99,7 +99,31 @@ static int           g_peers_cursor = 0;
 static int           g_inbox_cursor = 0;
 static int           g_log_cursor   = 0;
 
-// ATECC608B hardware crypto
+// ── CTF game ─────────────────────────────────────────────────────────────────
+
+struct CaptureRecord {
+    uint8_t  mac[6];
+    char     name[16];
+    uint32_t timestamp;
+    bool     verified;  // hardware-verified (ATECC-signed token)
+};
+
+static const int MAX_CAPTURES  = 50;
+static CaptureRecord* g_captures     = nullptr;
+static int            g_capture_count  = 0;   // badges we've captured
+static int            g_captured_count = 0;   // times we were captured by others
+static bool           g_cap_pending    = false;
+static uint32_t       g_cap_sent_at    = 0;
+static int            g_cap_peer_idx   = -1;
+static uint8_t        g_cap_nonce[32]  = {};
+static int            g_score_cursor   = 0;
+
+// Auto-response: set in on_recv, handled in main loop
+static volatile bool  g_challenge_flag = false;
+static BeaconMsg      g_challenge_msg  = {};
+static uint8_t        g_challenge_mac[6] = {};
+
+// ── ATECC608B hardware crypto
 static ATECCX08A g_atecc;
 static bool      g_atecc_available = false;  // chip found at 0x60
 static bool      g_atecc_ok        = false;  // provisioned + pubkey cached
@@ -1107,10 +1131,51 @@ static void on_recv(const uint8_t* mac, const uint8_t* data, int len) {
             g_ping_pending = false;
         }
 
+        // Handle CTF challenge — queue auto-response for main loop
+        if (msg.type == MSG_CHALLENGE && !g_challenge_flag) {
+            memcpy(&g_challenge_msg, &msg, sizeof(BeaconMsg));
+            memcpy(g_challenge_mac, mac, 6);
+            g_challenge_flag = true;
+        }
+
+        // Handle capture token — record if we were the attacker
+        if (msg.type == MSG_CAP_TOKEN && g_cap_pending && g_cap_peer_idx >= 0) {
+            if (memcmp(g_peers[g_cap_peer_idx].mac, mac, 6) == 0) {
+                g_cap_pending = false;
+                bool ver = false;
+                if (g_atecc_ok) {
+                    // Verify: target signed (nonce + our_mac)
+                    uint8_t my_mac[6];
+                    WiFi.macAddress(my_mac);
+                    uint8_t sig_data[38];
+                    memcpy(sig_data,      g_cap_nonce, 32);
+                    memcpy(sig_data + 32, my_mac, 6);
+                    uint8_t digest[32];
+                    mbedtls_sha256(sig_data, 38, digest, 0);
+                    g_atecc.wakeUp();
+                    ver = g_atecc.verifySignature(digest, msg.sig, msg.pubkey);
+                    g_atecc.sleep();
+                }
+                if (g_capture_count < MAX_CAPTURES) {
+                    memcpy(g_captures[g_capture_count].mac, mac, 6);
+                    strncpy(g_captures[g_capture_count].name, msg.name,
+                            sizeof(g_captures[0].name));
+                    g_captures[g_capture_count].timestamp = millis();
+                    g_captures[g_capture_count].verified  = ver;
+                    g_capture_count++;
+                }
+                Serial.printf("[ctf] captured %s (%s)\n",
+                    msg.name, ver ? "verified" : "unverified");
+                g_needs_redraw = true;
+            }
+        }
+
         g_recv_flag = true;
         Serial.printf("[espnow] recv %s from %s (%02X:%02X:%02X:%02X:%02X:%02X) #%u\n",
             msg.type == MSG_PING ? "PING" : msg.type == MSG_PONG ? "PONG" :
-            msg.type == MSG_TEXT ? "TEXT" : "BCN",
+            msg.type == MSG_TEXT ? "TEXT" :
+            msg.type == MSG_CHALLENGE ? "CHAL" :
+            msg.type == MSG_CAP_TOKEN ? "CAP" : "BCN",
             msg.name, mac[0], mac[1], mac[2], mac[3], mac[4], mac[5], msg.counter);
     }
 }
@@ -1153,6 +1218,10 @@ static void shutdown_espnow() {
     g_peers_cursor    = 0;
     g_inbox_cursor    = 0;
     g_log_cursor      = 0;
+    g_score_cursor    = 0;
+    g_cap_pending     = false;
+    g_cap_peer_idx    = -1;
+    g_challenge_flag  = false;
     g_ping_pending    = false;
     g_pong_flag       = false;
     g_last_rtt        = -1;
@@ -1212,10 +1281,10 @@ static void espnow_tab_header(const char* title) {
     display.setFont(&FreeMonoBold9pt7b);
     display.setTextColor(GxEPD_BLACK);
 
-    // Tab bar: [BEACON] [PEERS] [INBOX] [LOG]
-    const char* tabs[] = {"BEACON", "PEERS", "INBOX", "LOG"};
+    // Tab bar: [BCN] [PEERS] [INBOX] [LOG] [SCORE]  (BCN shortened for 5-tab fit)
+    const char* tabs[] = {"BCN", "PEERS", "INBOX", "LOG", "SCORE"};
     int x = 0;
-    for (int i = 0; i < 4; i++) {
+    for (int i = 0; i < 5; i++) {  // 5 tabs: BCN PEERS INBOX LOG SCORE
         int tw = strlen(tabs[i]) * 11 + 4;
         if (i == g_espnow_tab) {
             display.fillRect(x, 0, tw, 18, GxEPD_BLACK);
@@ -1505,9 +1574,9 @@ static void draw_espnow_target() {
 
         display.setFont(&FreeMono9pt7b);
 
-        const char* options[] = { "PING", "MESSAGE" };
-        for (int i = 0; i < 2; i++) {
-            int y = 64 + i * 28;
+        const char* options[] = { "PING", "MESSAGE", "CAPTURE" };
+        for (int i = 0; i < 3; i++) {
+            int y = 54 + i * 28;
             if (i == g_target_cursor) {
                 display.fillRect(0, y - 14, display.width(), 18, GxEPD_BLACK);
                 display.setTextColor(GxEPD_WHITE);
@@ -1631,12 +1700,65 @@ static void draw_espnow_log() {
     display.hibernate();
 }
 
+static void draw_espnow_score() {
+    display.setFullWindow();
+    display.firstPage();
+    do {
+        espnow_tab_header("SCORE");
+        display.setFont(&FreeMono9pt7b);
+        display.setTextColor(GxEPD_BLACK);
+
+        char header[32];
+        snprintf(header, sizeof(header), "Captured: %d  Got: %d",
+            g_capture_count, g_captured_count);
+        display.setCursor(8, 36);
+        display.print(header);
+
+        if (g_cap_pending) {
+            display.setCursor(8, 54);
+            display.print("Waiting for response");
+        } else if (g_capture_count == 0) {
+            display.setCursor(8, 60);
+            display.print("No captures yet.");
+            display.setCursor(8, 78);
+            display.print("Go to PEERS, select");
+            display.setCursor(8, 96);
+            display.print("a badge, then CAPTURE.");
+        } else {
+            uint32_t now = millis();
+            int visible = min(g_capture_count - g_score_cursor, 4);
+            for (int i = 0; i < visible; i++) {
+                int idx = g_score_cursor + i;
+                int y = 50 + i * 28;
+                char tbuf[8];
+                relative_time(now - g_captures[idx].timestamp, tbuf, sizeof(tbuf));
+                char line[24];
+                snprintf(line, sizeof(line), "%s %s%s",
+                    g_captures[idx].name, tbuf,
+                    g_captures[idx].verified ? " [V]" : "");
+                display.setCursor(8, y);
+                display.print(line);
+            }
+            if (g_capture_count > 4) {
+                char more[16];
+                snprintf(more, sizeof(more), "%d/%d", g_score_cursor + 1, g_capture_count);
+                display.setCursor(200, 36);
+                display.print(more);
+            }
+        }
+
+        page_footer("UP/DN:scroll CXL:back");
+    } while (display.nextPage());
+    display.hibernate();
+}
+
 static void draw_espnow() {
     switch (g_espnow_tab) {
         case 0: draw_espnow_beacon(); break;
         case 1: draw_espnow_peers();  break;
         case 2: draw_espnow_inbox();  break;
         case 3: draw_espnow_log();    break;
+        case 4: draw_espnow_score();  break;
     }
 }
 
@@ -1746,9 +1868,9 @@ static void handle_buttons(uint8_t pressed) {
 
         case STATE_ESPNOW:
             if (pressed & BTN_LEFT)
-                { g_espnow_tab = (g_espnow_tab + 3) % 4; g_needs_redraw = true; }
+                { g_espnow_tab = (g_espnow_tab + 4) % 5; g_needs_redraw = true; }
             if (pressed & BTN_RIGHT)
-                { g_espnow_tab = (g_espnow_tab + 1) % 4; g_needs_redraw = true; }
+                { g_espnow_tab = (g_espnow_tab + 1) % 5; g_needs_redraw = true; }
             if (pressed & BTN_UP) {
                 if (g_espnow_tab == 0)
                     { enter_espnow_edit(); g_state = STATE_ESPNOW_EDIT; g_needs_redraw = true; }
@@ -1758,6 +1880,8 @@ static void handle_buttons(uint8_t pressed) {
                     { g_inbox_cursor--; g_needs_redraw = true; }
                 else if (g_espnow_tab == 3 && g_log_cursor > 0)
                     { g_log_cursor--; g_needs_redraw = true; }
+                else if (g_espnow_tab == 4 && g_score_cursor > 0)
+                    { g_score_cursor--; g_needs_redraw = true; }
             }
             if (pressed & BTN_DOWN) {
                 if (g_espnow_tab == 1 && g_peers_cursor < g_peer_count - 1)
@@ -1766,6 +1890,8 @@ static void handle_buttons(uint8_t pressed) {
                     { g_inbox_cursor++; g_needs_redraw = true; }
                 else if (g_espnow_tab == 3 && g_log_cursor < g_peer_count - 1)
                     { g_log_cursor++; g_needs_redraw = true; }
+                else if (g_espnow_tab == 4 && g_score_cursor < g_capture_count - 1)
+                    { g_score_cursor++; g_needs_redraw = true; }
             }
             if (pressed & BTN_SELECT) {
                 if (g_espnow_tab == 0) {
@@ -1783,9 +1909,9 @@ static void handle_buttons(uint8_t pressed) {
 
         case STATE_ESPNOW_TARGET:
             if (pressed & BTN_UP)
-                { g_target_cursor = (g_target_cursor - 1 + 2) % 2; g_needs_redraw = true; }
+                { g_target_cursor = (g_target_cursor - 1 + 3) % 3; g_needs_redraw = true; }
             if (pressed & BTN_DOWN)
-                { g_target_cursor = (g_target_cursor + 1) % 2; g_needs_redraw = true; }
+                { g_target_cursor = (g_target_cursor + 1) % 3; g_needs_redraw = true; }
             if (pressed & BTN_SELECT) {
                 if (g_target_cursor == 0) {
                     // PING
@@ -1799,15 +1925,36 @@ static void handle_buttons(uint8_t pressed) {
                     g_ping_sent_at = millis();
                     g_ping_pending = true;
                     Serial.printf("[espnow] ping -> %s\n", g_peers[g_target_peer_idx].name);
-                    g_espnow_tab = 0;  // go watch BEACON for RTT
+                    g_espnow_tab = 0;
                     g_state = STATE_ESPNOW;
-                } else {
+                } else if (g_target_cursor == 1) {
                     // MESSAGE
                     memset(g_msg_buf, 0, sizeof(g_msg_buf));
                     g_msg_buf[0]    = 'A';
                     g_msg_pos       = 0;
                     g_msg_char_idx  = 0;
                     g_state = STATE_ESPNOW_MSG;
+                } else {
+                    // CAPTURE — send a signed challenge nonce to the target
+                    ensure_unicast_peer(g_peers[g_target_peer_idx].mac);
+                    BeaconMsg chal = {};
+                    chal.type = MSG_CHALLENGE;
+                    strncpy(chal.name, g_callsign, sizeof(chal.name));
+                    WiFi.macAddress(chal.mac);
+                    chal.counter = ++g_send_count;
+                    // Fill text[32] with hardware random nonce
+                    for (int nb = 0; nb < 4; nb++) {
+                        uint32_t r = esp_random();
+                        memcpy((uint8_t*)chal.text + nb * 4, &r, 4);
+                    }
+                    memcpy(g_cap_nonce, chal.text, 32);
+                    g_cap_peer_idx  = g_target_peer_idx;
+                    g_cap_sent_at   = millis();
+                    g_cap_pending   = true;
+                    esp_now_send(g_peers[g_target_peer_idx].mac, (uint8_t*)&chal, sizeof(chal));
+                    Serial.printf("[ctf] sent capture challenge -> %s\n", g_peers[g_target_peer_idx].name);
+                    g_espnow_tab = 4;  // watch SCORE tab for result
+                    g_state = STATE_ESPNOW;
                 }
                 g_needs_redraw = true;
             }
@@ -1953,6 +2100,10 @@ void setup() {
     if (!g_inbox) g_inbox = (InboxEntry*)malloc(MAX_INBOX * sizeof(InboxEntry));
     memset(g_inbox, 0, MAX_INBOX * sizeof(InboxEntry));
 
+    g_captures = (CaptureRecord*)heap_caps_malloc(MAX_CAPTURES * sizeof(CaptureRecord), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!g_captures) g_captures = (CaptureRecord*)malloc(MAX_CAPTURES * sizeof(CaptureRecord));
+    memset(g_captures, 0, MAX_CAPTURES * sizeof(CaptureRecord));
+
     init_peripherals();
 
     esp_sleep_wakeup_cause_t cause = esp_sleep_get_wakeup_cause();
@@ -2021,6 +2172,43 @@ void loop() {
         pong.counter = ++g_send_count;
         esp_now_send(g_pong_mac, (uint8_t*)&pong, sizeof(pong));
         Serial.println("[espnow] sent pong");
+    }
+
+    // CTF: auto-respond to capture challenges
+    if (g_challenge_flag && g_espnow_up) {
+        g_challenge_flag = false;
+        g_captured_count++;
+        BeaconMsg tok = {};
+        tok.type = MSG_CAP_TOKEN;
+        strncpy(tok.name, g_callsign, sizeof(tok.name));
+        WiFi.macAddress(tok.mac);
+        tok.counter = ++g_send_count;
+        memcpy(tok.text, g_challenge_msg.text, 32);  // echo nonce
+        if (g_atecc_ok) {
+            // Sign (nonce + attacker_mac)
+            uint8_t sig_data[38];
+            memcpy(sig_data,      g_challenge_msg.text,  32);  // nonce
+            memcpy(sig_data + 32, g_challenge_mac, 6);          // attacker MAC
+            uint8_t digest[32];
+            mbedtls_sha256(sig_data, 38, digest, 0);
+            g_atecc.wakeUp();
+            if (g_atecc.createSignature(digest, 0)) {
+                memcpy(tok.pubkey, g_atecc_pubkey, PUBLIC_KEY_SIZE);
+                memcpy(tok.sig,    g_atecc.signature, SIGNATURE_SIZE);
+            }
+            g_atecc.sleep();
+        }
+        ensure_unicast_peer(g_challenge_mac);
+        esp_now_send(g_challenge_mac, (uint8_t*)&tok, sizeof(tok));
+        Serial.printf("[ctf] sent capture token to %s\n", g_challenge_msg.name);
+    }
+
+    // CTF: capture timeout (5 seconds)
+    if (g_cap_pending && (millis() - g_cap_sent_at > 5000)) {
+        g_cap_pending   = false;
+        g_cap_peer_idx  = -1;
+        Serial.println("[ctf] capture timed out");
+        if (g_state == STATE_ESPNOW && g_espnow_tab == 4) g_needs_redraw = true;
     }
 
     // ECDSA verification (deferred from on_recv callback to main loop)
