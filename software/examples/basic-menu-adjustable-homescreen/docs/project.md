@@ -1,8 +1,8 @@
-# NULL City Badge — Project Documentation
+# OnionDAO Badge — Project Documentation
 
 ## What This Is
 
-The NULL City Badge is a wearable hardware badge built around an ESP32-S3
+The OnionDAO Badge is a wearable hardware badge built around an ESP32-S3
 microcontroller. It has a 2.7-inch e-paper display, six buttons, a secure
 element chip, and expansion ports for radio (CC1101) or audio modules.
 
@@ -42,15 +42,18 @@ Button IRQ        : GPIO1 (falling edge, unused — we poll instead)
 ## Repository Layout
 
 ```
-null-city-badge-main/
+oniondao-badge-main/
 ├── README.md              Top-level overview and quick start
 │
-├── firmware/              Active Arduino/PlatformIO project
-│   ├── platformio.ini     Board config, dependencies
-│   ├── include/
-│   │   └── badge_pins.h   All pin numbers in one place
-│   └── src/
-│       └── main.cpp       Entire firmware source
+├── firmware/              ESP-IDF project (Arduino core as a component)
+│   ├── CMakeLists.txt      Top-level project + shared component path
+│   ├── sdkconfig.defaults  Target, 8 MB flash, partition table
+│   ├── partitions.csv      Partition layout (= Arduino default_8MB.csv)
+│   └── main/
+│       ├── CMakeLists.txt   main component registration
+│       ├── idf_component.yml Arduino core + library dependencies
+│       ├── badge_pins.h     All pin numbers in one place
+│       └── main.cpp         Entire firmware source
 │
 ├── badge-art/             Desktop tool: draw or import images, send to badge
 │   ├── badge_art.py       Launch this to open the art tool
@@ -78,43 +81,47 @@ null-city-badge-main/
 
 ### Requirements
 
-- [PlatformIO](https://platformio.org/) (already installed at `~/.local/bin/pio`)
-- Badge connected via USB on `/dev/ttyUSB0`
+- [ESP-IDF v5.5.x](https://docs.espressif.com/projects/esp-idf/en/release-v5.5/esp32s3/get-started/) with the `esp32s3` toolchain installed
+- Badge connected via USB (find your port, e.g. `/dev/tty.usbserial-10`)
+
+Run all commands in an ESP-IDF terminal (VS Code "ESP-IDF Terminal", or after
+`. $IDF_PATH/export.sh`). The Arduino core (`arduino-esp32`) and libraries are
+fetched/located automatically on first build — no manual `set-target` needed.
 
 ### Build only
 
 ```bash
 cd firmware
-pio run
+idf.py build
 ```
 
-The compiled binary lands at `firmware/.pio/build/null-city-badge/firmware.bin`.
+The compiled binary lands at `firmware/build/oniondao-badge.bin`.
 
 ### Build and flash
 
 ```bash
 cd firmware
-pio run --target upload
+idf.py -p /dev/tty.usbserial-10 flash      # use your serial port
 ```
 
 If the upload fails to connect, put the badge into download mode manually:
 1. Hold **BOOT** button
 2. Press and release **RST** button
 3. Release **BOOT**
-4. Run `pio run --target upload` again
+4. Run the flash command again
 
 ### Serial monitor
 
 ```bash
 cd firmware
-pio device monitor
+idf.py -p /dev/tty.usbserial-10 monitor    # Ctrl-] to exit
 ```
 
-Or directly: `python3 -m serial.tools.miniterm /dev/ttyUSB0 115200`
+Or directly: `python3 -m serial.tools.miniterm /dev/tty.usbserial-10 115200`
 
 ---
 
-## Firmware Overview (`firmware/src/main.cpp`)
+## Firmware Overview (`firmware/main/main.cpp`)
 
 ### State machine
 
@@ -289,7 +296,7 @@ If you want to go back to the original badge firmware:
 
 ## Extending the Firmware
 
-All firmware lives in `firmware/src/main.cpp`. The patterns below cover the most
+All firmware lives in `firmware/main/main.cpp`. The patterns below cover the most
 common extension points.
 
 ### Adding a menu item and new screen
@@ -425,9 +432,9 @@ Free GPIOs on the top header: GPIO4, GPIO5, GPIO6, GPIO7, GPIO15, GPIO16, GPIO38
 **Serial monitor**
 
 ```bash
-pio device monitor          # from the firmware/ directory
+idf.py -p /dev/tty.usbserial-10 monitor   # from the firmware/ directory
 # or
-python3 -m serial.tools.miniterm /dev/ttyUSB0 115200
+python3 -m serial.tools.miniterm /dev/tty.usbserial-10 115200
 ```
 
 **Display not updating**

@@ -1,6 +1,6 @@
 # Contributing
 
-Thanks for wanting to add something to the NULL City Badge! This repo is
+Thanks for wanting to add something to the OnionDAO Badge! This repo is
 intentionally light on rules — the goal is a low-friction place to share
 hardware mods, firmware, guides, and CTF-style challenges that other badge
 owners can clone and flash in an afternoon.

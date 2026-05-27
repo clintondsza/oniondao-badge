@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-NULL City Badge — Art Tool
+OnionDAO Badge — Art Tool
 
 Draw black-and-white artwork or import any image, preview it at badge scale,
 then send it to the badge over USB serial in one click.
@@ -36,7 +36,7 @@ MAGIC     = b"IMG:"
 class BadgeArtTool:
     def __init__(self, root: tk.Tk):
         self.root = root
-        self.root.title("NULL City Badge — Art Tool")
+        self.root.title("OnionDAO Badge — Art Tool")
         self.root.resizable(False, False)
 
         # Internal 1-bit image.  Pillow mode '1': pixel 1 = white, 0 = black.

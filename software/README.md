@@ -1,6 +1,6 @@
 # Software
 
-Community-driven firmware, examples, guides, and mods for the NULL City
+Community-driven firmware, examples, guides, and mods for the OnionDAO
 Badge. **PRs welcome** — see [`../docs/CONTRIBUTING.md`](../docs/CONTRIBUTING.md).
 
 ## Folders
@@ -25,6 +25,9 @@ Long-form, narrative documentation. "Build a 433 MHz spectrum analyser",
 "Wire up a CTF challenge using the ATECC608B", "Port MicroPython to the
 badge". Markdown lives alongside any reference code.
 
+- **[esp-idf-vscode-setup.md](guides/esp-idf-vscode-setup.md)** — start here:
+  install VS Code + ESP-IDF **v5.5.x** and build/flash the badge.
+
 ### `mods/`
 
 Full firmware projects. Forks, variants, conference-specific builds, your
@@ -35,8 +38,10 @@ personal daily-driver firmware. One folder per project.
 The badge is plain ESP32-S3 + CH340C, so **any** ESP32-S3 toolchain works.
 Pick what you already know:
 
-- **Arduino-ESP32** — easiest entry point.
-- **ESP-IDF** — full control, recommended for non-trivial mods.
+- **ESP-IDF** — full control; **what the `examples/` and `mods/` here ship
+  with** (Arduino core as a component). Set it up with the
+  [VS Code + ESP-IDF guide](guides/esp-idf-vscode-setup.md) — use **v5.5.x**.
+- **Arduino-ESP32** — easiest entry point for your own sketches.
 - **PlatformIO** — best DX if you're shipping multi-target projects.
 - **MicroPython / CircuitPython** — quick scripting, REPL over the
   CH340C serial port.

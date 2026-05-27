@@ -1,17 +1,25 @@
 # Hardware Overview
 
-Deep dive on every subsystem on the NULL City Badge. Pair this with
+Deep dive on every subsystem on the OnionDAO Badge. Pair this with
 [`PINOUT.md`](PINOUT.md) (where every GPIO lives) and
 [`MODULES.md`](MODULES.md) (what the swappable RF / audio modules do).
 
 ---
 
-## 1. Main MCU — ESP32-S3-WROOM-1
+## 1. Main MCU — ESP32-S3-WROOM-1-N8R8
 
 - Espressif ESP32-S3 dual-core Xtensa LX7 @ up to 240 MHz
 - 2.4 GHz Wi-Fi b/g/n + Bluetooth LE 5.0
 - Native USB OTG (not exposed — USB-C goes through CH340C)
-- Module integrates the antenna, PSRAM (variant-dependent), and flash
+- Module integrates the PCB antenna, flash, and PSRAM
+- **Memory:** `N8` = 8 MB quad-SPI flash, `R8` = 8 MB **Octal-SPI (OPI)** PSRAM
+
+> **Firmware note:** the `R8` PSRAM is Octal, not quad. It stays disabled
+> unless you select Octal mode explicitly — ESP-IDF `SPI RAM → Mode = Octal`
+> (flash size 8 MB); Arduino-ESP32 `PSRAM = OPI PSRAM`; PlatformIO
+> `board_build.arduino.memory_type = qio_opi` + `-DBOARD_HAS_PSRAM`. The
+> KiCad schematic symbol value is the generic `ESP32-S3-WROOM-1`; the actual
+> board is built with the N8R8 variant.
 
 ### Strapping pins to be careful with
 
@@ -171,7 +179,7 @@ mutual exclusion.
 
 ## 10. Mechanical / 3D
 
-- Full board STEP: [`pcb/null-city-badge.step`](../pcb/null-city-badge.step)
+- Full board STEP: [`pcb/oniondao-badge.step`](../pcb/oniondao-badge.step)
 - Lanyard / additional 3D assets: [`pcb/3d/`](../pcb/3d/)
 
 ## 11. Manufacturing Outputs
@@ -179,7 +187,7 @@ mutual exclusion.
 Already-generated fabrication outputs are in
 [`pcb/production/`](../pcb/production/):
 
-- `null-city-badge.zip` — gerbers + drills + P&P
+- `oniondao-badge.zip` — gerbers + drills + P&P
 - `netlist.ipc` — IPC-D-356 netlist
 - `bom-list_*.xlsx` — per-variant BOMs
 

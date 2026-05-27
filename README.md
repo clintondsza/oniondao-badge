@@ -1,7 +1,8 @@
-# NULL City Badge
+# OnionDAO Badge
 
 An open-source, hacker-conference-style electronic badge built around the
-**ESP32-S3-WROOM-1**, with swappable RF / audio / storage modules, an e-paper
+**ESP32-S3-WROOM-1-N8R8** (8 MB flash + 8 MB Octal PSRAM), with swappable
+RF / audio / storage modules, an e-paper
 (or TFT) display socket, a secure element, an I²C IO expander for the button
 matrix, and dual side-mounted expansion ports for hardware mods.
 
@@ -9,8 +10,8 @@ Designed in **KiCad 9.0.3**. The hardware (schematics, PCB, BOM, fabrication
 outputs, STEP model) lives in [`pcb/`](pcb). The software lives in
 [`software/`](software) and is community-driven — PRs welcome.
 
-![Top](pcb/null-city-badge_top.png)
-![Bottom](pcb/null-city-badge_btm.png)
+![Top](pcb/oniondao-badge_top.png)
+![Bottom](pcb/oniondao-badge_btm.png)
 
 ---
 
@@ -31,7 +32,8 @@ outputs, STEP model) lives in [`pcb/`](pcb). The software lives in
 
 | | |
 |---|---|
-| **MCU** | Espressif ESP32-S3-WROOM-1 (Wi-Fi + BT 5.0 LE, dual-core Xtensa LX7) |
+| **MCU** | Espressif **ESP32-S3-WROOM-1-N8R8** (Wi-Fi + BT 5.0 LE, dual-core Xtensa LX7) |
+| **Memory** | 8 MB quad-SPI flash (`N8`) + 8 MB **Octal-SPI (OPI)** PSRAM (`R8`) |
 | **USB / Serial** | WCH **CH340C** USB-UART bridge w/ DTR/RTS auto-reset |
 | **Secure Element** | Microchip **ATECC608B-SSHDA** (I²C, power-gated) |
 | **IO Expander** | TI **TCA9534** (I²C, addr `0x20`) driving the 6-button matrix (PB1–PB6) |
@@ -71,17 +73,17 @@ outputs, STEP model) lives in [`pcb/`](pcb). The software lives in
 oniondao-badge/
 ├── README.md                   ← you are here
 ├── pcb/                        ← KiCad 9.0.3 hardware sources
-│   ├── null-city-badge.kicad_pro
-│   ├── null-city-badge.kicad_sch         (top-level schematic)
-│   ├── null-city-badge.kicad_pcb         (board layout)
+│   ├── oniondao-badge.kicad_pro
+│   ├── oniondao-badge.kicad_sch         (top-level schematic)
+│   ├── oniondao-badge.kicad_pcb         (board layout)
 │   ├── CC1101_MOD.kicad_sch              (Sub-GHz RF module)
 │   ├── SOUND_MOD.kicad_sch               (I²S amp + PDM mic)
-│   ├── null-city-badge.step              (full 3D model)
+│   ├── oniondao-badge.step              (full 3D model)
 │   ├── 3d/                               (additional STEP assets)
 │   ├── production/                       (gerbers, BOMs, netlist)
-│   ├── null-city-badge_top.png           (board render — top)
-│   ├── null-city-badge_btm.png           (board render — bottom)
-│   └── null badge.html                   (interactive IO reference)
+│   ├── oniondao-badge_top.png           (board render — top)
+│   ├── oniondao-badge_btm.png           (board render — bottom)
+│   └── oniondao badge.html                   (interactive IO reference)
 ├── docs/
 │   ├── HARDWARE.md             ← deep dive on every subsystem
 │   ├── PINOUT.md               ← full GPIO ↔ net ↔ peripheral table
@@ -94,7 +96,7 @@ oniondao-badge/
     └── mods/                   ← community firmware mods & forks
 ```
 
-> **Tip:** open [`pcb/null badge.html`](pcb/null%20badge.html) in a browser for
+> **Tip:** open [`pcb/oniondao badge.html`](pcb/oniondao%20badge.html) in a browser for
 > a colour-coded, searchable, filterable view of the IO table. It is the
 > source of truth that [`docs/PINOUT.md`](docs/PINOUT.md) mirrors in markdown.
 
@@ -114,16 +116,37 @@ The docs are split so you can read just what you need:
 ### Manufacturing
 
 - Gerbers, drill files, and pick-and-place are zipped in
-  [`pcb/production/null-city-badge.zip`](pcb/production/null-city-badge.zip).
+  [`pcb/production/oniondao-badge.zip`](pcb/production/oniondao-badge.zip).
 - BOMs per variant: `bom-list_cc1101.xlsx`, `bom-list_sound.xlsx`,
   `bom-list_lanyard_new.xlsx`.
 - IPC-D-356 netlist: `pcb/production/netlist.ipc`.
 
 ## Quick Start (Software)
 
-The badge enumerates as a standard CH340 serial port. Any ESP32-S3 toolchain
-works — **ESP-IDF**, **Arduino-ESP32**, **PlatformIO**, **MicroPython**,
-**CircuitPython**.
+The badge enumerates as a standard CH340 serial port, so any ESP32-S3 toolchain
+works at the hardware level — **ESP-IDF**, **Arduino-ESP32**, **PlatformIO**,
+**MicroPython**, **CircuitPython**.
+
+> **Building the firmware in this repo?** The projects under `software/` are
+> **ESP-IDF v5.5.x** projects (with the Arduino core as a component). Follow the
+> step-by-step **[VS Code + ESP-IDF setup guide](software/guides/esp-idf-vscode-setup.md)**
+> to install the toolchain and flash a badge.
+
+### Memory configuration (N8R8)
+
+The populated module is an **ESP32-S3-WROOM-1-N8R8**: 8 MB flash + 8 MB PSRAM
+in **Octal (OPI)** mode. PSRAM will not initialise unless you select Octal
+mode explicitly — quad-mode defaults silently disable it. Set per toolchain:
+
+| Toolchain | Flash | PSRAM |
+|-----------|-------|-------|
+| **ESP-IDF** (`sdkconfig`) | `CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y` | `CONFIG_SPIRAM=y`, `CONFIG_SPIRAM_MODE_OCT=y`, `CONFIG_SPIRAM_SPEED_80M=y` |
+| **Arduino-ESP32** (boards menu) | `Flash Size = 8MB` | `PSRAM = OPI PSRAM` |
+| **PlatformIO** | `board_build.flash_size = 8MB` | `board_build.arduino.memory_type = qio_opi` + `-DBOARD_HAS_PSRAM` |
+
+The firmware projects under [`software/`](software) already carry these settings
+in their `sdkconfig.defaults` — see the
+[VS Code + ESP-IDF setup guide](software/guides/esp-idf-vscode-setup.md).
 
 ### Programming
 
@@ -189,7 +212,7 @@ covering display, audio, RF, and the secure element.
 
 ## Pinout Cheat Sheet
 
-Source of truth: [`pcb/null badge.html`](pcb/null%20badge.html) — open it in
+Source of truth: [`pcb/oniondao badge.html`](pcb/oniondao%20badge.html) — open it in
 a browser for the filterable view. The markdown mirror is
 [`docs/PINOUT.md`](docs/PINOUT.md).
 

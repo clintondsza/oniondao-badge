@@ -2381,7 +2381,7 @@
 			(uuid "8031d984-c5ef-4653-9775-d85c487286bf")
 		)
 		(instances
-			(project "null-city-badge"
+			(project "oniondao-badge"
 				(path "/96a9ebd7-4f87-4060-87a7-f00d27473ddc/8c5168c8-f359-473b-9459-5b246b7098e5"
 					(reference "C31")
 					(unit 1)
@@ -3497,7 +3497,7 @@
 			(uuid "4df1b599-1187-4d7f-9bd7-99ed6f12ead5")
 		)
 		(instances
-			(project "null-city-badge"
+			(project "oniondao-badge"
 				(path "/96a9ebd7-4f87-4060-87a7-f00d27473ddc/8c5168c8-f359-473b-9459-5b246b7098e5"
 					(reference "J6")
 					(unit 1)
@@ -4169,7 +4169,7 @@
 			(uuid "e055e46d-6d43-44e1-be51-471ddc1405d4")
 		)
 		(instances
-			(project "null-city-badge"
+			(project "oniondao-badge"
 				(path "/96a9ebd7-4f87-4060-87a7-f00d27473ddc/8c5168c8-f359-473b-9459-5b246b7098e5"
 					(reference "#PWR01")
 					(unit 1)

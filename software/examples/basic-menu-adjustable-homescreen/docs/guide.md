@@ -1,4 +1,4 @@
-# Beginner's Guide — Hardware and C for the NULL City Badge
+# Beginner's Guide — Hardware and C for the OnionDAO Badge
 
 This guide explains what is actually happening when you build and run firmware
 on the badge. No prior hardware or C experience assumed.
@@ -341,7 +341,7 @@ prefs.end();
 
 The badge uses NVS to persist the custom home screen image across power cycles.
 The NVS partition lives in a dedicated area of flash and survives firmware
-uploads (it is not erased by `pio run --target upload`).
+uploads (it is not erased by `idf.py flash`).
 
 ---
 
@@ -420,7 +420,7 @@ overhead.
 display.fillScreen(GxEPD_WHITE);       // fill background
 display.setFont(&FreeMonoBold9pt7b);   // choose a font
 display.setCursor(8, 22);              // move text cursor (x, y in pixels)
-display.print("NULL CITY BADGE");      // draw text
+display.print("ONIONDAO BADGE");      // draw text
 display.drawFastHLine(0, 30, 264, GxEPD_BLACK);  // horizontal line
 display.drawBitmap(0, 0, data, 264, 176, GxEPD_BLACK, GxEPD_WHITE);
 ```
@@ -433,9 +433,9 @@ packing internally.
 
 ## 9. What Happens When You Flash
 
-`pio run --target upload` does the following:
+`idf.py flash` does the following:
 
-1. **Compiles** all `.cpp` files in `src/` and the libraries into object
+1. **Compiles** all `.cpp` files in `main/` and the libraries into object
    files (`.o`), then **links** them into a single ELF binary
 2. **Packages** the binary into an ESP32 flash image (adding bootloader,
    partition table, and app segments at their correct flash addresses)

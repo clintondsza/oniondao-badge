@@ -1,7 +1,7 @@
 # Complete Pinout Reference
 
 This is a markdown mirror of the interactive table in
-[`pcb/null badge.html`](../pcb/null%20badge.html). Open the HTML in a
+[`pcb/oniondao badge.html`](../pcb/oniondao%20badge.html). Open the HTML in a
 browser for filterable / searchable views — this document is here so PR
 reviewers and search tools can read the pin map without rendering HTML.
 

@@ -1,4 +1,4 @@
-# NULL City Badge — Beginner Guide
+# OnionDAO Badge — Beginner Guide
 
 No hardware experience needed. This guide gets you from box to badge in a few minutes.
 
@@ -6,7 +6,7 @@ No hardware experience needed. This guide gets you from box to badge in a few mi
 
 ## What is this?
 
-The NULL City Badge is a wearable computer you can hold in your hand. It has a small
+The OnionDAO Badge is a wearable computer you can hold in your hand. It has a small
 black-and-white screen, six buttons, and a chip that can store secret keys. You can
 put your own artwork on the screen, navigate menus, and learn about the hardware and
 code that makes it work — all from the badge itself.

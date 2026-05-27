@@ -1,6 +1,6 @@
 # Tamagotchi
 
-A virtual pet for the NULL City Badge. Keep your creature alive through five
+A virtual pet for the OnionDAO Badge. Keep your creature alive through five
 evolution stages by feeding, playing, sleeping, and giving medicine.
 
 **Module variant required:** None — base badge only (e-paper display + TCA9534
@@ -42,13 +42,24 @@ If the pet dies, press SELECT to hatch a new egg.
 
 ## Build & flash
 
+Built with **ESP-IDF v5.5.x** (using the Arduino core as a managed component).
+**New to ESP-IDF?** Follow the
+[VS Code + ESP-IDF setup guide](../../guides/esp-idf-vscode-setup.md) first to
+install the toolchain. Then run these in an ESP-IDF terminal (VS Code
+"ESP-IDF Terminal", or after `. $IDF_PATH/export.sh`):
+
 ```bash
 cd software/mods/tamagotchi
-pio run -t upload
-pio device monitor
+idf.py build
+idf.py -p /dev/tty.usbserial-10 flash monitor   # use your serial port
 ```
 
-Requires: PlatformIO, `espressif32` platform, `/dev/ttyUSB0`.
+The S3 target, 8 MB flash, octal PSRAM and partition table are preconfigured in
+`sdkconfig.defaults` + `partitions.csv` — no `idf.py set-target` needed. The
+Arduino core (`arduino-esp32` 3.3.8) is fetched automatically on first build;
+GxEPD2 / Adafruit GFX / BusIO live in `../../components/`.
+
+Requires: ESP-IDF v5.5.x with the `esp32s3` toolchain installed.
 
 ## GPIOs used
 

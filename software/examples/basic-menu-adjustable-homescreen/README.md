@@ -14,7 +14,9 @@ Built with [Claude Code](https://claude.ai/code). Use this as your base layer, t
 
 - OnionDAO badge + USB-C cable
 - LiPo battery *(optional — the badge runs on USB power alone)*
-- [PlatformIO](https://platformio.org/) for flashing
+- **ESP-IDF v5.5.x** for building & flashing — see the
+  [VS Code + ESP-IDF setup guide](../../guides/esp-idf-vscode-setup.md)
+  (⚠️ use v5.5.x, *not* 6.0+)
 - Python 3 + pip for the art tool
 
 ---
@@ -42,12 +44,23 @@ Flip the board over. The LiPo connector is labeled **BAT / J2**.
 
 ## Step 3 — Flash the Firmware
 
-Connect the badge via USB-C, then:
+> First time? Install the toolchain via the
+> [VS Code + ESP-IDF setup guide](../../guides/esp-idf-vscode-setup.md) — then
+> you can just hit **Build, Flash and Monitor** (🔥) in VS Code instead of the
+> commands below.
+
+Connect the badge via USB-C, then, in an ESP-IDF terminal (VS Code
+"ESP-IDF Terminal", or after `. $IDF_PATH/export.sh`):
 
 ```bash
 cd firmware
-pio run --target upload
+idf.py build
+idf.py -p /dev/tty.usbserial-10 flash monitor   # use your serial port
 ```
+
+The S3 target, 8 MB flash and partition table are preconfigured in
+`firmware/sdkconfig.defaults` — no `idf.py set-target` needed. The Arduino core
+is fetched automatically on first build.
 
 If the upload fails to connect:
 1. Hold **BOOT** (back of board)
@@ -108,13 +121,14 @@ The image saves to internal flash and persists through sleep and power cycles.
 
 ## Go Further
 
-Drop `firmware/src/main.cpp` into your AI of choice and ask it to add new screens or menu items. This version was built using **[Claude Code](https://claude.ai/code)**.
+Drop `firmware/main/main.cpp` into your AI of choice and ask it to add new screens or menu items. This version was built using **[Claude Code](https://claude.ai/code)**.
 
 | File | Purpose |
 |------|---------|
-| `firmware/src/main.cpp` | All firmware — menus, buttons, image receiver |
-| `firmware/include/badge_pins.h` | Every GPIO pin number in one place |
-| `firmware/platformio.ini` | Build config and library dependencies |
+| `firmware/main/main.cpp` | All firmware — menus, buttons, image receiver |
+| `firmware/main/badge_pins.h` | Every GPIO pin number in one place |
+| `firmware/CMakeLists.txt` + `sdkconfig.defaults` | ESP-IDF build config (target, flash, PSRAM, partitions) |
+| `firmware/main/idf_component.yml` | Arduino core + library dependencies |
 | `badge-art/badge_art.py` | Art tool — draw, import, and send images |
 | `docs/project.md` | Full firmware reference and extension patterns |
 | `docs/guide.md` | Hardware and C++ concepts for beginners |
