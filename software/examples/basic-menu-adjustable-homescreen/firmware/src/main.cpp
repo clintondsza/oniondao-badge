@@ -59,26 +59,32 @@ struct PeerEntry {
     char     name[16];
     int8_t   rssi;
     uint32_t last_seen;
+    uint32_t first_seen;
 };
 
 struct InboxEntry {
     char     name[16];
     char     text[32];
     uint32_t counter;
+    uint32_t timestamp;
 };
+
+static const int MAX_PEERS = 500;
+static const int MAX_INBOX = 200;
 
 static volatile bool g_recv_flag   = false;
 static BeaconMsg     g_last_recv   = {};
 static uint32_t      g_send_count  = 0;
 static bool          g_espnow_up   = false;
 static char          g_callsign[16] = {};
-static PeerEntry     g_peers[10]   = {};
+static PeerEntry*    g_peers        = nullptr;
 static int           g_peer_count  = 0;
-static InboxEntry    g_inbox[5]    = {};
+static InboxEntry*   g_inbox        = nullptr;
 static int           g_inbox_count = 0;
-static int           g_espnow_tab   = 0;  // 0=BEACON 1=PEERS 2=INBOX
+static int           g_espnow_tab   = 0;  // 0=BEACON 1=PEERS 2=INBOX 3=LOG
 static int           g_peers_cursor = 0;
 static int           g_inbox_cursor = 0;
+static int           g_log_cursor   = 0;
 
 // Callsign editor
 static const char EDIT_CHARSET[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 -";
@@ -455,6 +461,21 @@ static void check_serial_image() {
     while (Serial.available()) {
         hdr[0] = hdr[1]; hdr[1] = hdr[2]; hdr[2] = hdr[3];
         hdr[3] = Serial.read();
+
+        if (hdr[0]=='L' && hdr[1]=='O' && hdr[2]=='G' && hdr[3]==':') {
+            Serial.printf("peers,%d\r\n", g_peer_count);
+            Serial.println("mac,callsign,rssi,first_seen_ms,last_seen_ms");
+            for (int i = 0; i < g_peer_count; i++) {
+                Serial.printf("%02X:%02X:%02X:%02X:%02X:%02X,%s,%d,%u,%u\r\n",
+                    g_peers[i].mac[0], g_peers[i].mac[1], g_peers[i].mac[2],
+                    g_peers[i].mac[3], g_peers[i].mac[4], g_peers[i].mac[5],
+                    g_peers[i].name, (int)g_peers[i].rssi,
+                    (unsigned)g_peers[i].first_seen, (unsigned)g_peers[i].last_seen);
+            }
+            Serial.println("OK");
+            memset(hdr, 0, sizeof(hdr));
+            return;
+        }
 
         if (hdr[0]=='I' && hdr[1]=='M' && hdr[2]=='G' && hdr[3]==':') {
             size_t received = 0;
@@ -869,11 +890,12 @@ static void upsert_peer(const uint8_t* mac, const BeaconMsg& msg, int8_t rssi) {
             return;
         }
     }
-    if (g_peer_count < 10) {
+    if (g_peer_count < MAX_PEERS) {
         memcpy(g_peers[g_peer_count].mac,  mac,      6);
         memcpy(g_peers[g_peer_count].name, msg.name, sizeof(g_peers[0].name));
-        g_peers[g_peer_count].rssi      = rssi;
-        g_peers[g_peer_count].last_seen = millis();
+        g_peers[g_peer_count].rssi       = rssi;
+        g_peers[g_peer_count].last_seen  = millis();
+        g_peers[g_peer_count].first_seen = millis();
         g_peer_count++;
     }
 }
@@ -916,13 +938,14 @@ static void on_recv(const uint8_t* mac, const uint8_t* data, int len) {
         memcpy((void*)&g_last_recv, &msg, sizeof(BeaconMsg));
 
         // Push to inbox (ring buffer — newest at front)
-        if (g_inbox_count >= 5)
-            memmove(&g_inbox[1], &g_inbox[0], sizeof(InboxEntry) * 4);
+        if (g_inbox_count >= MAX_INBOX)
+            memmove(&g_inbox[1], &g_inbox[0], sizeof(InboxEntry) * (MAX_INBOX - 1));
         else
             g_inbox_count++;
         strncpy(g_inbox[0].name,    msg.name, sizeof(g_inbox[0].name));
         strncpy(g_inbox[0].text,    msg.text, sizeof(g_inbox[0].text));
-        g_inbox[0].counter = msg.counter;
+        g_inbox[0].counter   = msg.counter;
+        g_inbox[0].timestamp = millis();
 
         // Handle ping — queue a pong reply via main loop
         if (msg.type == MSG_PING) {
@@ -961,18 +984,19 @@ static void shutdown_espnow() {
     esp_now_deinit();
     WiFi.mode(WIFI_OFF);
     g_espnow_up       = false;
-    g_peer_count      = 0;
+    // g_peer_count preserved — peer table is the attendance log
     g_send_count      = 0;
     g_inbox_count     = 0;
     g_espnow_tab      = 0;
     g_peers_cursor    = 0;
     g_inbox_cursor    = 0;
+    g_log_cursor      = 0;
     g_ping_pending    = false;
     g_pong_flag       = false;
     g_last_rtt        = -1;
     g_target_peer_idx = -1;
     memset((void*)&g_last_recv, 0, sizeof(g_last_recv));
-    memset(g_inbox, 0, sizeof(g_inbox));
+    memset(g_inbox, 0, MAX_INBOX * sizeof(InboxEntry));
     Serial.println("[espnow] shut down");
 }
 
@@ -1026,10 +1050,10 @@ static void espnow_tab_header(const char* title) {
     display.setFont(&FreeMonoBold9pt7b);
     display.setTextColor(GxEPD_BLACK);
 
-    // Tab bar: [BEACON] [PEERS] [INBOX]
-    const char* tabs[] = {"BEACON", "PEERS", "INBOX"};
+    // Tab bar: [BEACON] [PEERS] [INBOX] [LOG]
+    const char* tabs[] = {"BEACON", "PEERS", "INBOX", "LOG"};
     int x = 0;
-    for (int i = 0; i < 3; i++) {
+    for (int i = 0; i < 4; i++) {
         int tw = strlen(tabs[i]) * 11 + 4;
         if (i == g_espnow_tab) {
             display.fillRect(x, 0, tw, 18, GxEPD_BLACK);
@@ -1191,27 +1215,34 @@ static void draw_espnow_inbox() {
             display.setCursor(8, 50);
             display.print("No messages yet.");
         } else {
-            int visible = min(g_inbox_count, 3);
+            int visible = min(g_inbox_count - g_inbox_cursor, 3);
             for (int i = 0; i < visible; i++) {
+                int idx = g_inbox_cursor + i;
                 int y = 28 + i * 38;
                 display.drawFastHLine(0, y - 4, display.width(), GxEPD_BLACK);
 
                 char buf[32];
-                snprintf(buf, sizeof(buf), "From: %s #%u", g_inbox[i].name, g_inbox[i].counter);
+                snprintf(buf, sizeof(buf), "From: %s #%u", g_inbox[idx].name, g_inbox[idx].counter);
                 display.setCursor(8, y + 10);
                 display.print(buf);
 
-                if (g_inbox[i].text[0]) {
+                if (g_inbox[idx].text[0]) {
                     display.setCursor(8, y + 26);
-                    display.print(g_inbox[i].text);
+                    display.print(g_inbox[idx].text);
                 } else {
                     display.setCursor(8, y + 26);
                     display.print("[beacon]");
                 }
             }
+            if (g_inbox_count > 3) {
+                char more[16];
+                snprintf(more, sizeof(more), "%d/%d", g_inbox_cursor + 1, g_inbox_count);
+                display.setCursor(200, 36);
+                display.print(more);
+            }
         }
 
-        page_footer("LFT/RGT:tab  CXL:back");
+        page_footer("UP/DN:scroll CXL:back");
     } while (display.nextPage());
     display.hibernate();
 }
@@ -1371,11 +1402,72 @@ static void draw_espnow_msg() {
     display.hibernate();
 }
 
+static const char* relative_time(uint32_t ms_ago, char* buf, size_t bufsz) {
+    uint32_t secs = ms_ago / 1000;
+    if (secs < 60)        snprintf(buf, bufsz, "%us", (unsigned)secs);
+    else if (secs < 3600) snprintf(buf, bufsz, "%um", (unsigned)(secs / 60));
+    else                  snprintf(buf, bufsz, ">1h");
+    return buf;
+}
+
+static void draw_espnow_log() {
+    display.setFullWindow();
+    display.firstPage();
+    do {
+        espnow_tab_header("LOG");
+        display.setFont(&FreeMono9pt7b);
+        display.setTextColor(GxEPD_BLACK);
+
+        if (g_peer_count == 0) {
+            display.setCursor(8, 50);
+            display.print("No peers logged yet.");
+            display.setCursor(8, 68);
+            display.print("Send a beacon first.");
+        } else {
+            uint32_t now = millis();
+            int visible = min(g_peer_count - g_log_cursor, 4);
+            for (int i = 0; i < visible; i++) {
+                int idx = g_log_cursor + i;
+                int y = 22 + i * 34;
+
+                if (i > 0)
+                    display.drawFastHLine(0, y, display.width(), GxEPD_BLACK);
+
+                char tbuf1[8], tbuf2[8];
+                relative_time(now - g_peers[idx].first_seen, tbuf1, sizeof(tbuf1));
+                relative_time(now - g_peers[idx].last_seen,  tbuf2, sizeof(tbuf2));
+
+                // Line 1: callsign + rssi
+                char line1[24];
+                snprintf(line1, sizeof(line1), "%-10s %ddBm", g_peers[idx].name, (int)g_peers[idx].rssi);
+                display.setCursor(8, y + 14);
+                display.print(line1);
+
+                // Line 2: first/last times
+                char line2[24];
+                snprintf(line2, sizeof(line2), "1st:%s last:%s", tbuf1, tbuf2);
+                display.setCursor(8, y + 30);
+                display.print(line2);
+            }
+            if (g_peer_count > 4) {
+                char more[16];
+                snprintf(more, sizeof(more), "%d/%d", g_log_cursor + 1, g_peer_count);
+                display.setCursor(200, 36);
+                display.print(more);
+            }
+        }
+
+        page_footer("UP/DN:scroll CXL:back");
+    } while (display.nextPage());
+    display.hibernate();
+}
+
 static void draw_espnow() {
     switch (g_espnow_tab) {
         case 0: draw_espnow_beacon(); break;
         case 1: draw_espnow_peers();  break;
         case 2: draw_espnow_inbox();  break;
+        case 3: draw_espnow_log();    break;
     }
 }
 
@@ -1478,18 +1570,26 @@ static void handle_buttons(uint8_t pressed) {
 
         case STATE_ESPNOW:
             if (pressed & BTN_LEFT)
-                { g_espnow_tab = (g_espnow_tab + 2) % 3; g_needs_redraw = true; }
+                { g_espnow_tab = (g_espnow_tab + 3) % 4; g_needs_redraw = true; }
             if (pressed & BTN_RIGHT)
-                { g_espnow_tab = (g_espnow_tab + 1) % 3; g_needs_redraw = true; }
+                { g_espnow_tab = (g_espnow_tab + 1) % 4; g_needs_redraw = true; }
             if (pressed & BTN_UP) {
                 if (g_espnow_tab == 0)
                     { enter_espnow_edit(); g_state = STATE_ESPNOW_EDIT; g_needs_redraw = true; }
                 else if (g_espnow_tab == 1 && g_peers_cursor > 0)
                     { g_peers_cursor--; g_needs_redraw = true; }
+                else if (g_espnow_tab == 2 && g_inbox_cursor > 0)
+                    { g_inbox_cursor--; g_needs_redraw = true; }
+                else if (g_espnow_tab == 3 && g_log_cursor > 0)
+                    { g_log_cursor--; g_needs_redraw = true; }
             }
             if (pressed & BTN_DOWN) {
                 if (g_espnow_tab == 1 && g_peers_cursor < g_peer_count - 1)
                     { g_peers_cursor++; g_needs_redraw = true; }
+                else if (g_espnow_tab == 2 && g_inbox_cursor < g_inbox_count - 1)
+                    { g_inbox_cursor++; g_needs_redraw = true; }
+                else if (g_espnow_tab == 3 && g_log_cursor < g_peer_count - 1)
+                    { g_log_cursor++; g_needs_redraw = true; }
             }
             if (pressed & BTN_SELECT) {
                 if (g_espnow_tab == 0) {
@@ -1650,6 +1750,15 @@ void setup() {
     Serial.setRxBufferSize(8192);  // default 256 drops the 5808-byte image transfer
     Serial.begin(115200);
     delay(200);
+
+    // Allocate large arrays from PSRAM; fall back to heap if PSRAM unavailable
+    g_peers = (PeerEntry*)heap_caps_malloc(MAX_PEERS * sizeof(PeerEntry), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!g_peers) g_peers = (PeerEntry*)malloc(MAX_PEERS * sizeof(PeerEntry));
+    memset(g_peers, 0, MAX_PEERS * sizeof(PeerEntry));
+
+    g_inbox = (InboxEntry*)heap_caps_malloc(MAX_INBOX * sizeof(InboxEntry), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!g_inbox) g_inbox = (InboxEntry*)malloc(MAX_INBOX * sizeof(InboxEntry));
+    memset(g_inbox, 0, MAX_INBOX * sizeof(InboxEntry));
 
     init_peripherals();
 
