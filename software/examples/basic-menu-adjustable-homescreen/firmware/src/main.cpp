@@ -852,7 +852,7 @@ static void upsert_peer(const uint8_t* mac, const BeaconMsg& msg, int8_t rssi) {
     for (int i = 0; i < g_peer_count; i++) {
         if (memcmp(g_peers[i].mac, mac, 6) == 0) {
             memcpy(g_peers[i].name, msg.name, sizeof(g_peers[i].name));
-            g_peers[i].rssi      = rssi;
+            // rssi not updated here — on_promisc owns it after first discovery
             g_peers[i].last_seen = millis();
             return;
         }
@@ -1615,7 +1615,6 @@ static void handle_buttons(uint8_t pressed) {
                 }
             }
             if (pressed & BTN_SELECT) {
-                g_edit_buf[g_edit_pos + 1] = '\0';  // terminate at cursor
                 save_callsign();
                 g_state = STATE_ESPNOW;
                 g_needs_redraw = true;
