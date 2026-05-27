@@ -79,6 +79,7 @@ Press any button from the home screen to open the menu.
 | 5 | Display Test | Four screen patterns to confirm the display works |
 | 6 | Hardware Guide | 10 short lessons on the physical components |
 | 7 | Software Guide | 10 short lessons on the C++ firmware |
+| 8 | ESPNow Beacon | Send and receive badge-to-badge wireless messages |
 
 After 60 seconds of no activity the badge sleeps automatically. The image stays on screen with no power — press any button to wake it.
 
@@ -103,6 +104,21 @@ python3 badge-art/badge_art.py
 The image saves to internal flash and persists through sleep and power cycles.
 
 > The badge must be awake to receive an image. If it slept, press any button first, then send within 60 seconds.
+
+---
+
+## ESPNow — Badge-to-Badge Wireless
+
+Menu item 8 turns on ESPNow, Espressif's direct 2.4 GHz peer-to-peer protocol. No Wi-Fi router or access point required — badges talk directly to each other.
+
+| Button | Action |
+|--------|--------|
+| SELECT | Broadcast a beacon (your MAC + a counter) to all nearby badges |
+| CANCEL | Return to the menu |
+
+The screen shows your own MAC address, how many beacons you have sent, and the name, MAC, and counter of the last badge that reached you. ESPNow only starts up when you enter this screen — it has no effect on boot time or battery when you are not using it.
+
+Flash the same firmware to two badges and navigate both to **8. ESPNow Beacon** to see them communicate.
 
 ---
 
