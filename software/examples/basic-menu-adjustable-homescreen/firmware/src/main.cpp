@@ -10,6 +10,9 @@
 #include <Fonts/FreeMonoBold24pt7b.h>
 #include <Fonts/FreeMono9pt7b.h>
 
+#include <WiFi.h>
+#include <esp_now.h>
+
 #include "badge_pins.h"
 
 // ── TCA9534 (buttons) ─────────────────────────────────────────────────────────
@@ -39,6 +42,18 @@ static uint32_t s_last_activity;
 #define IMG_SIZE (264 * 176 / 8)   // 5808 bytes
 static uint8_t img_buf[IMG_SIZE];
 
+// ── ESPNow ────────────────────────────────────────────────────────────────────
+struct BeaconMsg {
+    char     name[16];
+    uint8_t  mac[6];
+    uint32_t counter;
+};
+
+static volatile bool g_recv_flag  = false;
+static BeaconMsg     g_last_recv  = {};
+static uint32_t      g_send_count = 0;
+static bool          g_espnow_up  = false;
+
 // ── App state ─────────────────────────────────────────────────────────────────
 enum AppState {
     STATE_HOME,
@@ -48,7 +63,8 @@ enum AppState {
     STATE_I2C_SCAN,
     STATE_RNG,
     STATE_DISPLAY_TEST,
-    STATE_GUIDE
+    STATE_GUIDE,
+    STATE_ESPNOW,
 };
 
 static AppState g_state        = STATE_MENU;
@@ -74,7 +90,7 @@ static const struct GuideScreen* g_guide_src   = nullptr;
 static int                       g_guide_count = 0;
 static int                       g_guide_page  = 0;
 
-#define MENU_COUNT 7
+#define MENU_COUNT 8
 static const char* MENU_LABELS[MENU_COUNT] = {
     "1. System Info",
     "2. Button Test",
@@ -83,6 +99,7 @@ static const char* MENU_LABELS[MENU_COUNT] = {
     "5. Display Test",
     "6. Hardware Guide",
     "7. Software Guide",
+    "8. ESPNow Beacon",
 };
 
 // ── Guide data ────────────────────────────────────────────────────────────────
@@ -510,16 +527,15 @@ static void draw_home_screen() {
 // ── Draw: menu ────────────────────────────────────────────────────────────────
 
 static void draw_menu() {
-    // 7 items at 16px spacing (> 16 needed to avoid overlap; last item at y=140)
+    // 8 items at 16px spacing, starting at y=38 (last item at y=38+7*16=150)
     display.setFullWindow();
     display.firstPage();
     do {
         page_header("NULL CITY BADGE");
         display.setFont(&FreeMono9pt7b);
         for (int i = 0; i < MENU_COUNT; i++) {
-            int16_t y = 46 + i * 16;
+            int16_t y = 38 + i * 16;
             if (i == g_cursor) {
-                // Selection bar height matches spacing
                 display.fillRect(0, y - 12, display.width(), 15, GxEPD_BLACK);
                 display.setTextColor(GxEPD_WHITE);
             } else {
@@ -528,11 +544,10 @@ static void draw_menu() {
             display.setCursor(8, y);
             display.print(MENU_LABELS[i]);
         }
-        // Custom footer: rule pushed down to clear last item
-        display.drawFastHLine(0, 150, display.width(), GxEPD_BLACK);
+        display.drawFastHLine(0, 158, display.width(), GxEPD_BLACK);
         display.setFont(&FreeMono9pt7b);
         display.setTextColor(GxEPD_BLACK);
-        display.setCursor(8, 165);
+        display.setCursor(8, 173);
         display.print("UP/DN  SEL  CXL:home");
     } while (display.nextPage());
     display.hibernate();
@@ -777,6 +792,97 @@ static void draw_guide() {
     display.hibernate();
 }
 
+// ── ESPNow logic ──────────────────────────────────────────────────────────────
+
+static void on_recv(const uint8_t* mac, const uint8_t* data, int len) {
+    if ((size_t)len == sizeof(BeaconMsg)) {
+        memcpy((void*)&g_last_recv, data, sizeof(BeaconMsg));
+        g_recv_flag = true;
+    }
+}
+
+static void send_beacon() {
+    BeaconMsg msg = {};
+    snprintf(msg.name, sizeof(msg.name), "NULL-CITY");
+    WiFi.macAddress(msg.mac);
+    msg.counter = ++g_send_count;
+    uint8_t broadcast[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+    esp_now_send(broadcast, (uint8_t*)&msg, sizeof(msg));
+    Serial.printf("[espnow] sent beacon #%u\n", msg.counter);
+}
+
+static void init_espnow() {
+    if (g_espnow_up) return;
+    WiFi.mode(WIFI_STA);
+    WiFi.disconnect();
+    if (esp_now_init() != ESP_OK) {
+        Serial.println("[espnow] init failed");
+        return;
+    }
+    esp_now_register_recv_cb(on_recv);
+
+    esp_now_peer_info_t peer = {};
+    memset(peer.peer_addr, 0xFF, 6);
+    peer.channel = 0;
+    peer.encrypt = false;
+    esp_now_add_peer(&peer);
+
+    g_espnow_up = true;
+    Serial.println("[espnow] ready");
+}
+
+// ── Draw: ESPNow beacon ───────────────────────────────────────────────────────
+
+static void draw_espnow() {
+    display.setFullWindow();
+    display.firstPage();
+    do {
+        page_header("ESPNOW BEACON");
+        display.setFont(&FreeMono9pt7b);
+        display.setTextColor(GxEPD_BLACK);
+
+        // Own MAC
+        char own_mac[18];
+        snprintf(own_mac, sizeof(own_mac), "%s", WiFi.macAddress().c_str());
+        char buf[32];
+        snprintf(buf, sizeof(buf), "Own: %s", own_mac);
+        display.setCursor(8, 50);
+        display.print(buf);
+
+        snprintf(buf, sizeof(buf), "Sent: %u", g_send_count);
+        display.setCursor(8, 68);
+        display.print(buf);
+
+        // Divider
+        display.drawFastHLine(8, 78, display.width() - 16, GxEPD_BLACK);
+
+        // Last received
+        display.setCursor(8, 96);
+        display.print("Last recv:");
+
+        if (g_last_recv.mac[0] || g_last_recv.mac[1] || g_last_recv.mac[2]) {
+            char peer_mac[18];
+            snprintf(peer_mac, sizeof(peer_mac),
+                "%02X:%02X:%02X:%02X:%02X:%02X",
+                g_last_recv.mac[0], g_last_recv.mac[1], g_last_recv.mac[2],
+                g_last_recv.mac[3], g_last_recv.mac[4], g_last_recv.mac[5]);
+            display.setCursor(8, 114);
+            display.print(g_last_recv.name);
+            display.setCursor(8, 132);
+            display.print(peer_mac);
+            snprintf(buf, sizeof(buf), "Count: %u", g_last_recv.counter);
+            display.setCursor(8, 142);
+            display.print(buf);
+        } else {
+            display.setCursor(8, 114);
+            display.print("(none yet)");
+        }
+
+        page_footer("SEL:send  CXL:back");
+    } while (display.nextPage());
+    display.hibernate();
+}
+
 // ── Dispatch ──────────────────────────────────────────────────────────────────
 
 static void dispatch_render() {
@@ -789,6 +895,7 @@ static void dispatch_render() {
         case STATE_RNG:          draw_rng();          break;
         case STATE_DISPLAY_TEST: draw_display_test(); break;
         case STATE_GUIDE:        draw_guide();        break;
+        case STATE_ESPNOW:       draw_espnow();       break;
     }
     g_needs_redraw = false;
 }
@@ -830,6 +937,10 @@ static void handle_buttons(uint8_t pressed) {
                         g_guide_page  = 0;
                         g_state = STATE_GUIDE;
                         break;
+                    case 7:
+                        init_espnow();
+                        g_state = STATE_ESPNOW;
+                        break;
                 }
                 g_needs_redraw = true;
             }
@@ -864,6 +975,11 @@ static void handle_buttons(uint8_t pressed) {
                 { g_guide_page = (g_guide_page + 1) % g_guide_count; g_needs_redraw = true; }
             if (pressed & BTN_CANCEL)
                 { g_state = STATE_MENU; g_needs_redraw = true; }
+            break;
+
+        case STATE_ESPNOW:
+            if (pressed & BTN_SELECT) { send_beacon(); g_needs_redraw = true; }
+            if (pressed & BTN_CANCEL) { g_state = STATE_MENU; g_needs_redraw = true; }
             break;
 
         default:
@@ -926,6 +1042,11 @@ void loop() {
 
     g_last_btns = btns;
     handle_buttons(pressed);
+
+    if (g_recv_flag && g_state == STATE_ESPNOW) {
+        g_recv_flag    = false;
+        g_needs_redraw = true;
+    }
 
     if (millis() - s_last_activity >= SLEEP_AFTER_MS) {
         go_to_sleep();
