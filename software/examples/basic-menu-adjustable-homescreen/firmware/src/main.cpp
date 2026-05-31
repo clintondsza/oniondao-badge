@@ -74,7 +74,7 @@ struct PeerEntry {
     bool     sig_present;       // peer sent a signature (false = old firmware)
     bool     blocked;           // user blocked or auto-blocked — pings silently ignored
     uint8_t  pubkey[64];        // their P-256 public key
-    uint8_t  ping_count;        // pings received in current rate-limit window
+    uint16_t ping_count;        // pings received in current rate-limit window (uint16 prevents wrap-bypass)
     uint32_t ping_window_start; // millis() when current window began
 };
 
@@ -114,6 +114,10 @@ static int            g_score_cursor   = 0;
 
 // Partial e-paper refresh counter — full refresh every 10 updates to clear ghosting
 static int            g_partial_count  = 0;
+
+// Spinlock protecting shared state written in the ESP-NOW callback task
+// and read in the Arduino main-loop task (dual-core ESP32-S3).
+static portMUX_TYPE   g_espnow_mux    = portMUX_INITIALIZER_UNLOCKED;
 
 // Auto-response: set in on_recv, handled in main loop
 static volatile bool  g_challenge_flag = false;
@@ -616,6 +620,7 @@ static void upsert_peer(const uint8_t* mac, const BeaconMsg& msg, int8_t rssi) {
     for (int i = 0; i < g_peer_count; i++) {
         if (memcmp(g_peers[i].mac, mac, 6) == 0) {
             memcpy(g_peers[i].name, msg.name, sizeof(g_peers[i].name));
+            g_peers[i].name[sizeof(g_peers[i].name) - 1] = '\0';
             // rssi not updated here — on_promisc owns it after first discovery
             g_peers[i].last_seen = millis();
             return;
@@ -624,6 +629,7 @@ static void upsert_peer(const uint8_t* mac, const BeaconMsg& msg, int8_t rssi) {
     if (g_peer_count < MAX_PEERS) {
         memcpy(g_peers[g_peer_count].mac,  mac,      6);
         memcpy(g_peers[g_peer_count].name, msg.name, sizeof(g_peers[0].name));
+        g_peers[g_peer_count].name[sizeof(g_peers[0].name) - 1] = '\0';
         g_peers[g_peer_count].rssi       = rssi;
         g_peers[g_peer_count].last_seen  = millis();
         g_peers[g_peer_count].first_seen = millis();
@@ -679,7 +685,9 @@ static void add_ping_peer(const uint8_t* mac) {
     memcpy(peer.peer_addr, mac, 6);
     peer.channel = 0;
     peer.encrypt = false;
-    esp_now_add_peer(&peer);
+    esp_err_t err = esp_now_add_peer(&peer);
+    if (err != ESP_OK)
+        Serial.printf("[espnow] add_ping_peer failed: %d (table full?)\n", err);
 }
 
 static void on_recv(const uint8_t* mac, const uint8_t* data, int len) {
@@ -695,9 +703,11 @@ static void on_recv(const uint8_t* mac, const uint8_t* data, int len) {
             if (msg.pubkey[i]) { has_sig = true; break; }
         }
         if (has_sig && g_atecc_ok && !g_needs_verify) {
+            portENTER_CRITICAL_ISR(&g_espnow_mux);
             memcpy(&g_pending_verify, &msg, sizeof(BeaconMsg));
             memcpy(g_pending_ver_mac, mac, 6);
             g_needs_verify = true;
+            portEXIT_CRITICAL_ISR(&g_espnow_mux);
         }
         // Mark peer as having sent a signature (regardless of verify result yet)
         for (int i = 0; i < g_peer_count; i++) {
@@ -738,8 +748,10 @@ static void on_recv(const uint8_t* mac, const uint8_t* data, int len) {
                 } else {
                     // All clear — upgrade sender to encrypted peer and send pong
                     ensure_unicast_peer(mac);
+                    portENTER_CRITICAL_ISR(&g_espnow_mux);
                     memcpy(g_pong_mac, mac, 6);
                     g_pong_flag = true;
+                    portEXIT_CRITICAL_ISR(&g_espnow_mux);
                 }
             }
         }
@@ -752,9 +764,11 @@ static void on_recv(const uint8_t* mac, const uint8_t* data, int len) {
 
         // Handle CTF challenge — queue auto-response for main loop
         if (msg.type == MSG_CHALLENGE && !g_challenge_flag) {
+            portENTER_CRITICAL_ISR(&g_espnow_mux);
             memcpy(&g_challenge_msg, &msg, sizeof(BeaconMsg));
             memcpy(g_challenge_mac, mac, 6);
             g_challenge_flag = true;
+            portEXIT_CRITICAL_ISR(&g_espnow_mux);
         }
 
         // Handle capture token — record if we were the attacker
@@ -779,6 +793,7 @@ static void on_recv(const uint8_t* mac, const uint8_t* data, int len) {
                     memcpy(g_captures[g_capture_count].mac, mac, 6);
                     strncpy(g_captures[g_capture_count].name, msg.name,
                             sizeof(g_captures[0].name));
+                    g_captures[g_capture_count].name[sizeof(g_captures[0].name) - 1] = '\0';
                     g_captures[g_capture_count].timestamp = millis();
                     g_captures[g_capture_count].verified  = ver;
                     g_capture_count++;
@@ -863,6 +878,7 @@ static void init_espnow() {
             Serial.printf("[espnow] generated callsign: %s\n", g_callsign);
         } else {
             strncpy(g_callsign, cs.c_str(), sizeof(g_callsign));
+            g_callsign[sizeof(g_callsign) - 1] = '\0';
         }
         prefs.end();
     }
@@ -1086,6 +1102,7 @@ static void save_callsign() {
     int len = strlen(g_edit_buf);
     while (len > 1 && g_edit_buf[len - 1] == ' ') g_edit_buf[--len] = '\0';
     strncpy(g_callsign, g_edit_buf, sizeof(g_callsign));
+    g_callsign[sizeof(g_callsign) - 1] = '\0';
     Preferences prefs;
     prefs.begin("badge", false);
     prefs.putString("callsign", g_callsign);
@@ -1531,10 +1548,12 @@ void setup() {
     // Allocate large arrays from PSRAM; fall back to heap if PSRAM unavailable
     g_peers = (PeerEntry*)heap_caps_malloc(MAX_PEERS * sizeof(PeerEntry), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!g_peers) g_peers = (PeerEntry*)malloc(MAX_PEERS * sizeof(PeerEntry));
+    if (!g_peers) { Serial.println("[FATAL] g_peers alloc failed"); while (true) delay(1000); }
     memset(g_peers, 0, MAX_PEERS * sizeof(PeerEntry));
 
     g_captures = (CaptureRecord*)heap_caps_malloc(MAX_CAPTURES * sizeof(CaptureRecord), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!g_captures) g_captures = (CaptureRecord*)malloc(MAX_CAPTURES * sizeof(CaptureRecord));
+    if (!g_captures) { Serial.println("[FATAL] g_captures alloc failed"); while (true) delay(1000); }
     memset(g_captures, 0, MAX_CAPTURES * sizeof(CaptureRecord));
 
     init_peripherals();
@@ -1589,45 +1608,66 @@ void loop() {
     }
 
     // Send pong reply from main loop (safe context)
-    if (g_pong_flag && g_espnow_up) {
-        g_pong_flag = false;
-        ensure_unicast_peer(g_pong_mac);
-        BeaconMsg pong = {};
-        pong.type = MSG_PONG;
-        strncpy(pong.name, g_callsign, sizeof(pong.name));
-        WiFi.macAddress(pong.mac);
-        pong.counter = ++g_send_count;
-        esp_now_send(g_pong_mac, (uint8_t*)&pong, sizeof(pong));
-        Serial.println("[espnow] sent pong");
+    {
+        uint8_t local_pong_mac[6];
+        bool do_pong = false;
+        portENTER_CRITICAL(&g_espnow_mux);
+        if (g_pong_flag && g_espnow_up) {
+            do_pong = true;
+            memcpy(local_pong_mac, g_pong_mac, 6);
+            g_pong_flag = false;
+        }
+        portEXIT_CRITICAL(&g_espnow_mux);
+        if (do_pong) {
+            ensure_unicast_peer(local_pong_mac);
+            BeaconMsg pong = {};
+            pong.type = MSG_PONG;
+            strncpy(pong.name, g_callsign, sizeof(pong.name));
+            WiFi.macAddress(pong.mac);
+            pong.counter = ++g_send_count;
+            esp_now_send(local_pong_mac, (uint8_t*)&pong, sizeof(pong));
+            Serial.println("[espnow] sent pong");
+        }
     }
 
-    // CTF: auto-respond to capture challenges
-    if (g_challenge_flag && g_espnow_up) {
-        g_challenge_flag = false;
-        g_captured_count++;
-        BeaconMsg tok = {};
-        tok.type = MSG_CAP_TOKEN;
-        strncpy(tok.name, g_callsign, sizeof(tok.name));
-        WiFi.macAddress(tok.mac);
-        tok.counter = ++g_send_count;
-        memcpy(tok.text, g_challenge_msg.text, 32);  // echo nonce
-        if (g_atecc_ok) {
-            // Sign (nonce + attacker_mac)
-            uint8_t sig_data[38];
-            memcpy(sig_data,      g_challenge_msg.text,  32);  // nonce
-            memcpy(sig_data + 32, g_challenge_mac, 6);          // attacker MAC
-            uint8_t digest[32];
-            mbedtls_sha256(sig_data, 38, digest, 0);
-            g_atecc.wakeUp();
-            if (g_atecc.createSignature(digest, 0)) {
-                memcpy(tok.pubkey, g_atecc_pubkey, PUBLIC_KEY_SIZE);
-                memcpy(tok.sig,    g_atecc.signature, SIGNATURE_SIZE);
-            }
-            g_atecc.sleep();
+    // CTF: auto-respond to capture challenges (copy shared state under lock)
+    {
+        BeaconMsg local_chal = {};
+        uint8_t   local_chal_mac[6];
+        bool do_challenge = false;
+        portENTER_CRITICAL(&g_espnow_mux);
+        if (g_challenge_flag && g_espnow_up) {
+            do_challenge = true;
+            memcpy(&local_chal,     &g_challenge_msg, sizeof(BeaconMsg));
+            memcpy(local_chal_mac,   g_challenge_mac,  6);
+            g_challenge_flag = false;
         }
-        ensure_unicast_peer(g_challenge_mac);
-        esp_now_send(g_challenge_mac, (uint8_t*)&tok, sizeof(tok));
-        Serial.printf("[ctf] sent capture token to %s\n", g_challenge_msg.name);
+        portEXIT_CRITICAL(&g_espnow_mux);
+        if (do_challenge) {
+            g_captured_count++;
+            BeaconMsg tok = {};
+            tok.type = MSG_CAP_TOKEN;
+            strncpy(tok.name, g_callsign, sizeof(tok.name));
+            WiFi.macAddress(tok.mac);
+            tok.counter = ++g_send_count;
+            memcpy(tok.text, local_chal.text, 32);
+            if (g_atecc_ok) {
+                uint8_t sig_data[38];
+                memcpy(sig_data,      local_chal.text, 32);
+                memcpy(sig_data + 32, local_chal_mac,  6);
+                uint8_t digest[32];
+                mbedtls_sha256(sig_data, 38, digest, 0);
+                g_atecc.wakeUp();
+                if (g_atecc.createSignature(digest, 0)) {
+                    memcpy(tok.pubkey, g_atecc_pubkey, PUBLIC_KEY_SIZE);
+                    memcpy(tok.sig,    g_atecc.signature, SIGNATURE_SIZE);
+                }
+                g_atecc.sleep();
+            }
+            ensure_unicast_peer(local_chal_mac);
+            esp_now_send(local_chal_mac, (uint8_t*)&tok, sizeof(tok));
+            Serial.printf("[ctf] sent capture token to %s\n", local_chal.name);
+        }
     }
 
     // CTF: capture timeout (5 seconds)
@@ -1635,28 +1675,41 @@ void loop() {
         g_cap_pending   = false;
         g_cap_peer_idx  = -1;
         Serial.println("[ctf] capture timed out");
-        if (g_state == STATE_ESPNOW && g_espnow_tab == 4) g_needs_redraw = true;
+        if (g_state == STATE_ESPNOW && g_espnow_tab == 3) g_needs_redraw = true;
     }
 
     // ECDSA verification (deferred from on_recv callback to main loop)
-    if (g_needs_verify && g_atecc_ok) {
-        g_needs_verify = false;
-        uint8_t digest[32];
-        mbedtls_sha256((const uint8_t*)&g_pending_verify, BEACON_SIGN_LEN, digest, 0);
-        g_atecc.wakeUp();
-        bool ok = g_atecc.verifySignature(digest, g_pending_verify.sig, g_pending_verify.pubkey);
-        g_atecc.sleep();
-        for (int i = 0; i < g_peer_count; i++) {
-            if (memcmp(g_peers[i].mac, g_pending_ver_mac, 6) == 0) {
-                g_peers[i].verified = ok;
-                memcpy(g_peers[i].pubkey, g_pending_verify.pubkey, PUBLIC_KEY_SIZE);
-                break;
-            }
+    // Copy shared state under lock before doing slow crypto operations
+    {
+        BeaconMsg local_verify = {};
+        uint8_t   local_ver_mac[6];
+        bool do_verify = false;
+        portENTER_CRITICAL(&g_espnow_mux);
+        if (g_needs_verify && g_atecc_ok) {
+            do_verify = true;
+            memcpy(&local_verify,   &g_pending_verify,  sizeof(BeaconMsg));
+            memcpy(local_ver_mac,    g_pending_ver_mac,  6);
+            g_needs_verify = false;
         }
-        Serial.printf("[atecc] verify from %s: %s\n",
-            g_pending_verify.name, ok ? "OK" : "FAIL");
-        if (g_state == STATE_ESPNOW && g_espnow_tab == 1)
-            g_needs_redraw = true;
+        portEXIT_CRITICAL(&g_espnow_mux);
+        if (do_verify) {
+            uint8_t digest[32];
+            mbedtls_sha256((const uint8_t*)&local_verify, BEACON_SIGN_LEN, digest, 0);
+            g_atecc.wakeUp();
+            bool ok = g_atecc.verifySignature(digest, local_verify.sig, local_verify.pubkey);
+            g_atecc.sleep();
+            for (int i = 0; i < g_peer_count; i++) {
+                if (memcmp(g_peers[i].mac, local_ver_mac, 6) == 0) {
+                    g_peers[i].verified = ok;
+                    memcpy(g_peers[i].pubkey, local_verify.pubkey, PUBLIC_KEY_SIZE);
+                    break;
+                }
+            }
+            Serial.printf("[atecc] verify from %s: %s\n",
+                local_verify.name, ok ? "OK" : "FAIL");
+            if (g_state == STATE_ESPNOW && g_espnow_tab == 1)
+                g_needs_redraw = true;
+        }
     }
 
     if (millis() - s_last_activity >= SLEEP_AFTER_MS) {
