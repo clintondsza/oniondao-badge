@@ -78,15 +78,7 @@ struct PeerEntry {
     uint32_t ping_window_start; // millis() when current window began
 };
 
-struct InboxEntry {
-    char     name[16];
-    char     text[32];
-    uint32_t counter;
-    uint32_t timestamp;
-};
-
 static const int MAX_PEERS       = 500;
-static const int MAX_INBOX       = 200;
 static const int PING_RATE_LIMIT = 5;      // max pings from one peer per window
 static const uint32_t PING_WINDOW_MS = 10000; // 10-second rolling window
 
@@ -97,11 +89,8 @@ static bool          g_espnow_up   = false;
 static char          g_callsign[16] = {};
 static PeerEntry*    g_peers        = nullptr;
 static int           g_peer_count  = 0;
-static InboxEntry*   g_inbox        = nullptr;
-static int           g_inbox_count = 0;
-static int           g_espnow_tab   = 0;  // 0=BEACON 1=PEERS 2=INBOX 3=LOG
+static int           g_espnow_tab   = 0;  // 0=BCN 1=PEERS 2=LOG 3=SCORE
 static int           g_peers_cursor = 0;
-static int           g_inbox_cursor = 0;
 static int           g_log_cursor   = 0;
 
 // ── CTF game ─────────────────────────────────────────────────────────────────
@@ -718,15 +707,6 @@ static void on_recv(const uint8_t* mac, const uint8_t* data, int len) {
             }
         }
 
-        // Push to inbox (ring buffer — newest at front)
-        if (g_inbox_count >= MAX_INBOX)
-            memmove(&g_inbox[1], &g_inbox[0], sizeof(InboxEntry) * (MAX_INBOX - 1));
-        else
-            g_inbox_count++;
-        strncpy(g_inbox[0].name,    msg.name, sizeof(g_inbox[0].name));
-        strncpy(g_inbox[0].text,    msg.text, sizeof(g_inbox[0].text));
-        g_inbox[0].counter   = msg.counter;
-        g_inbox[0].timestamp = millis();
 
         // Handle ping with three layers of protection:
         if (msg.type == MSG_PING) {
@@ -852,10 +832,8 @@ static void shutdown_espnow() {
     g_espnow_up       = false;
     // g_peer_count preserved — peer table is the attendance log
     g_send_count      = 0;
-    g_inbox_count     = 0;
     g_espnow_tab      = 0;
     g_peers_cursor    = 0;
-    g_inbox_cursor    = 0;
     g_log_cursor      = 0;
     g_score_cursor    = 0;
     g_cap_pending     = false;
@@ -867,7 +845,6 @@ static void shutdown_espnow() {
     g_last_rtt        = -1;
     g_target_peer_idx = -1;
     memset((void*)&g_last_recv, 0, sizeof(g_last_recv));
-    memset(g_inbox, 0, MAX_INBOX * sizeof(InboxEntry));
     Serial.println("[espnow] shut down");
 }
 
@@ -921,10 +898,10 @@ static void espnow_tab_header(const char* title) {
     display.setFont(&FreeMonoBold9pt7b);
     display.setTextColor(GxEPD_BLACK);
 
-    // Tab bar: [BCN] [PEERS] [INBOX] [LOG] [SCORE]  (BCN shortened for 5-tab fit)
-    const char* tabs[] = {"BCN", "PEERS", "INBOX", "LOG", "SCORE"};
+    // Tab bar: [BCN] [PEERS] [LOG] [SCORE]
+    const char* tabs[] = {"BCN", "PEERS", "LOG", "SCORE"};
     int x = 0;
-    for (int i = 0; i < 5; i++) {  // 5 tabs: BCN PEERS INBOX LOG SCORE
+    for (int i = 0; i < 4; i++) {
         int tw = strlen(tabs[i]) * 11 + 4;
         if (i == g_espnow_tab) {
             display.fillRect(x, 0, tw, 18, GxEPD_BLACK);
@@ -1095,59 +1072,9 @@ static void draw_espnow_peers() {
     display.hibernate();
 }
 
-static void draw_espnow_inbox() {
-    if (++g_partial_count >= 10) {
-        g_partial_count = 0;
-        display.setFullWindow();
-    } else {
-        display.setPartialWindow(0, 0, display.width(), display.height());
-    }
-    display.firstPage();
-    do {
-        espnow_tab_header("INBOX");
-        display.setFont(&FreeMono9pt7b);
-        display.setTextColor(GxEPD_BLACK);
-
-        if (g_inbox_count == 0) {
-            display.setCursor(8, 50);
-            display.print("No messages yet.");
-        } else {
-            int visible = min(g_inbox_count - g_inbox_cursor, 3);
-            for (int i = 0; i < visible; i++) {
-                int idx = g_inbox_cursor + i;
-                int y = 28 + i * 38;
-                display.drawFastHLine(0, y - 4, display.width(), GxEPD_BLACK);
-
-                char buf[32];
-                snprintf(buf, sizeof(buf), "From: %s #%u", g_inbox[idx].name, g_inbox[idx].counter);
-                display.setCursor(8, y + 10);
-                display.print(buf);
-
-                if (g_inbox[idx].text[0]) {
-                    display.setCursor(8, y + 26);
-                    display.print(g_inbox[idx].text);
-                } else {
-                    display.setCursor(8, y + 26);
-                    display.print("[beacon]");
-                }
-            }
-            if (g_inbox_count > 3) {
-                char more[16];
-                snprintf(more, sizeof(more), "%d/%d", g_inbox_cursor + 1, g_inbox_count);
-                display.setCursor(200, 36);
-                display.print(more);
-            }
-        }
-
-        page_footer("UP/DN:scroll CXL:back");
-    } while (display.nextPage());
-    display.hibernate();
-}
-
 static void enter_espnow_edit() {
     strncpy(g_edit_buf, g_callsign, sizeof(g_edit_buf));
     g_edit_pos = 0;
-    // Find current char's index in charset
     char c = g_edit_buf[0];
     g_edit_char_idx = 0;
     for (int i = 0; i < EDIT_CHARSET_LEN; i++) {
@@ -1156,7 +1083,6 @@ static void enter_espnow_edit() {
 }
 
 static void save_callsign() {
-    // Trim trailing spaces
     int len = strlen(g_edit_buf);
     while (len > 1 && g_edit_buf[len - 1] == ' ') g_edit_buf[--len] = '\0';
     strncpy(g_callsign, g_edit_buf, sizeof(g_callsign));
@@ -1175,7 +1101,6 @@ static void draw_espnow_edit() {
         display.setFont(&FreeMono9pt7b);
         display.setTextColor(GxEPD_BLACK);
 
-        // Draw each character of the edit buffer, highlight current position
         int len = max((int)strlen(g_edit_buf), g_edit_pos + 1);
         if (len > 12) len = 12;
         for (int i = 0; i < len; i++) {
@@ -1192,29 +1117,18 @@ static void draw_espnow_edit() {
         }
         display.setTextColor(GxEPD_BLACK);
 
-        // Character picker: show prev / current / next
         int prev_idx = (g_edit_char_idx - 1 + EDIT_CHARSET_LEN) % EDIT_CHARSET_LEN;
         int next_idx = (g_edit_char_idx + 1) % EDIT_CHARSET_LEN;
 
         display.drawFastHLine(8, 66, display.width() - 16, GxEPD_BLACK);
-
         display.setCursor(8, 84);
-        display.print("UP  [");
-        display.print(EDIT_CHARSET[prev_idx]);
-        display.print("]");
-
+        display.print("UP  ["); display.print(EDIT_CHARSET[prev_idx]); display.print("]");
         display.setCursor(8, 102);
         display.setFont(&FreeMonoBold9pt7b);
-        display.print("    [");
-        display.print(EDIT_CHARSET[g_edit_char_idx]);
-        display.print("] <- current");
+        display.print("    ["); display.print(EDIT_CHARSET[g_edit_char_idx]); display.print("] <- current");
         display.setFont(&FreeMono9pt7b);
-
         display.setCursor(8, 118);
-        display.print("DN  [");
-        display.print(EDIT_CHARSET[next_idx]);
-        display.print("]");
-
+        display.print("DN  ["); display.print(EDIT_CHARSET[next_idx]); display.print("]");
         display.drawFastHLine(8, 128, display.width() - 16, GxEPD_BLACK);
 
         page_footer("RGT:nxt SEL:sav CXL");
@@ -1371,9 +1285,8 @@ static void draw_espnow() {
     switch (g_espnow_tab) {
         case 0: draw_espnow_beacon(); break;
         case 1: draw_espnow_peers();  break;
-        case 2: draw_espnow_inbox();  break;
-        case 3: draw_espnow_log();    break;
-        case 4: draw_espnow_score();  break;
+        case 2: draw_espnow_log();    break;
+        case 3: draw_espnow_score();  break;
     }
 }
 
@@ -1446,29 +1359,25 @@ static void handle_buttons(uint8_t pressed) {
 
         case STATE_ESPNOW:
             if (pressed & BTN_LEFT)
-                { g_espnow_tab = (g_espnow_tab + 4) % 5; g_needs_redraw = true; }
+                { g_espnow_tab = (g_espnow_tab + 3) % 4; g_needs_redraw = true; }
             if (pressed & BTN_RIGHT)
-                { g_espnow_tab = (g_espnow_tab + 1) % 5; g_needs_redraw = true; }
+                { g_espnow_tab = (g_espnow_tab + 1) % 4; g_needs_redraw = true; }
             if (pressed & BTN_UP) {
                 if (g_espnow_tab == 0)
                     { enter_espnow_edit(); g_state = STATE_ESPNOW_EDIT; g_needs_redraw = true; }
                 else if (g_espnow_tab == 1 && g_peers_cursor > 0)
                     { g_peers_cursor--; g_needs_redraw = true; }
-                else if (g_espnow_tab == 2 && g_inbox_cursor > 0)
-                    { g_inbox_cursor--; g_needs_redraw = true; }
-                else if (g_espnow_tab == 3 && g_log_cursor > 0)
+                else if (g_espnow_tab == 2 && g_log_cursor > 0)
                     { g_log_cursor--; g_needs_redraw = true; }
-                else if (g_espnow_tab == 4 && g_score_cursor > 0)
+                else if (g_espnow_tab == 3 && g_score_cursor > 0)
                     { g_score_cursor--; g_needs_redraw = true; }
             }
             if (pressed & BTN_DOWN) {
                 if (g_espnow_tab == 1 && g_peers_cursor < g_peer_count - 1)
                     { g_peers_cursor++; g_needs_redraw = true; }
-                else if (g_espnow_tab == 2 && g_inbox_cursor < g_inbox_count - 1)
-                    { g_inbox_cursor++; g_needs_redraw = true; }
-                else if (g_espnow_tab == 3 && g_log_cursor < g_peer_count - 1)
+                else if (g_espnow_tab == 2 && g_log_cursor < g_peer_count - 1)
                     { g_log_cursor++; g_needs_redraw = true; }
-                else if (g_espnow_tab == 4 && g_score_cursor < g_capture_count - 1)
+                else if (g_espnow_tab == 3 && g_score_cursor < g_capture_count - 1)
                     { g_score_cursor++; g_needs_redraw = true; }
             }
             if (pressed & BTN_SELECT) {
@@ -1524,7 +1433,7 @@ static void handle_buttons(uint8_t pressed) {
                     g_cap_pending   = true;
                     esp_now_send(g_peers[g_target_peer_idx].mac, (uint8_t*)&chal, sizeof(chal));
                     Serial.printf("[ctf] sent capture challenge -> %s\n", g_peers[g_target_peer_idx].name);
-                    g_espnow_tab = 4;  // watch SCORE tab for result
+                    g_espnow_tab = 3;  // watch SCORE tab for result
                     g_state = STATE_ESPNOW;
                 } else {
                     // BLOCK / UNBLOCK
@@ -1623,10 +1532,6 @@ void setup() {
     g_peers = (PeerEntry*)heap_caps_malloc(MAX_PEERS * sizeof(PeerEntry), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!g_peers) g_peers = (PeerEntry*)malloc(MAX_PEERS * sizeof(PeerEntry));
     memset(g_peers, 0, MAX_PEERS * sizeof(PeerEntry));
-
-    g_inbox = (InboxEntry*)heap_caps_malloc(MAX_INBOX * sizeof(InboxEntry), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (!g_inbox) g_inbox = (InboxEntry*)malloc(MAX_INBOX * sizeof(InboxEntry));
-    memset(g_inbox, 0, MAX_INBOX * sizeof(InboxEntry));
 
     g_captures = (CaptureRecord*)heap_caps_malloc(MAX_CAPTURES * sizeof(CaptureRecord), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!g_captures) g_captures = (CaptureRecord*)malloc(MAX_CAPTURES * sizeof(CaptureRecord));
