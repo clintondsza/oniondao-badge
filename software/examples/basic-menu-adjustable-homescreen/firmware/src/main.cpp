@@ -118,6 +118,9 @@ static int            g_cap_peer_idx   = -1;
 static uint8_t        g_cap_nonce[32]  = {};
 static int            g_score_cursor   = 0;
 
+// Partial e-paper refresh counter — full refresh every 10 updates to clear ghosting
+static int            g_partial_count  = 0;
+
 // Auto-response: set in on_recv, handled in main loop
 static volatile bool  g_challenge_flag = false;
 static BeaconMsg      g_challenge_msg  = {};
@@ -141,32 +144,23 @@ static char       g_edit_buf[16]  = {};
 static int        g_edit_pos      = 0;
 static int        g_edit_char_idx = 0;
 
-// Unicast targeting + ping/pong + messaging
+// Unicast targeting + ping/pong
 static int           g_target_peer_idx = -1;
-static int           g_target_cursor   = 0;   // 0=PING 1=MESSAGE
+static int           g_target_cursor   = 0;   // 0=PING 1=CAPTURE
 static uint32_t      g_ping_sent_at    = 0;
 static int32_t       g_last_rtt        = -1;  // ms, -1=no measurement yet
 static bool          g_ping_pending    = false;
 static volatile bool g_pong_flag       = false;
 static uint8_t       g_pong_mac[6]     = {};
-static char          g_msg_buf[32]     = {};
-static int           g_msg_pos         = 0;
-static int           g_msg_char_idx    = 0;
 
 // ── App state ─────────────────────────────────────────────────────────────────
 enum AppState {
     STATE_HOME,
     STATE_MENU,
     STATE_SYS_INFO,
-    STATE_BTN_TEST,
-    STATE_I2C_SCAN,
-    STATE_RNG,
-    STATE_DISPLAY_TEST,
-    STATE_GUIDE,
     STATE_ESPNOW,
     STATE_ESPNOW_EDIT,
     STATE_ESPNOW_TARGET,
-    STATE_ESPNOW_MSG,
     STATE_ATECC_INTRO,  // first-time identity setup — show intro, wait for SELECT
     STATE_ATECC_DONE,   // provisioning complete — show result, any button → ESPNow
 };
@@ -176,273 +170,11 @@ static int      g_cursor       = 0;
 static bool     g_needs_redraw = true;
 static uint8_t  g_last_btns    = 0;
 
-// Button test: tracks currently-held buttons for display
-static uint8_t  g_btn_display  = 0;
-
-// Display test: current pattern index
-static int      g_disp_pattern = 0;
-
-// RNG: 16 bytes to display
-static uint8_t  g_rng_bytes[16];
-
-// I2C scan results
-static uint8_t  g_i2c_addrs[20];
-static int      g_i2c_count = 0;
-
-// Guide: pointer to active guide, count, current page
-static const struct GuideScreen* g_guide_src   = nullptr;
-static int                       g_guide_count = 0;
-static int                       g_guide_page  = 0;
-
-#define MENU_COUNT 8
+#define MENU_COUNT 2
 static const char* MENU_LABELS[MENU_COUNT] = {
     "1. System Info",
-    "2. Button Test",
-    "3. I2C Scanner",
-    "4. RNG / Crypto",
-    "5. Display Test",
-    "6. Hardware Guide",
-    "7. Software Guide",
-    "8. ESPNow Beacon",
+    "2. ESPNow Beacon",
 };
-
-// ── Guide data ────────────────────────────────────────────────────────────────
-// Line length limit: 23 chars (23 * 11px xAdvance = 253px < 264px display)
-// Line spacing: 18px (= yAdvance of FreeMono9pt7b — prevents vertical overlap)
-
-struct GuideScreen {
-    const char* title;
-    const char* lines[6];  // nullptr = end of content
-};
-
-static const GuideScreen HW_GUIDE[] = {
-    {
-        "ABOUT THIS BADGE",
-        {
-            "ESP32-S3 badge with:",
-            "264x176 e-paper display",
-            "6 buttons via I2C",
-            "Crypto secure element",
-            "CC1101 radio module",
-            "LFT/RGT: flip pages",
-        }
-    },
-    {
-        "THE MCU",
-        {
-            "ESP32-S3 -- the brain",
-            "Dual Xtensa LX7 cores",
-            "Up to 240 MHz clock",
-            "512KB internal SRAM",
-            "8MB OPI PSRAM external",
-            "WiFi + BLE built in",
-        }
-    },
-    {
-        "GPIO PINS",
-        {
-            "General Purpose I/O",
-            "Each pin: in or output",
-            "HIGH = 3.3V  LOW = 0V",
-            "Set HIGH: turn on LED",
-            "Read pin: detect input",
-            "ESP32-S3 has 45 GPIOs",
-        }
-    },
-    {
-        "SPI BUS",
-        {
-            "Serial Peripheral IF",
-            "CLK, MOSI, MISO, CS",
-            "Master drives the clock",
-            "Transfers bits serially",
-            "Fast: 4+ MHz typical",
-            "Badge: MCU -> SSD1680",
-        }
-    },
-    {
-        "E-PAPER DISPLAY",
-        {
-            "Capsules of charged ink",
-            "Black/white by E-field",
-            "SSD1680 controller chip",
-            "264x176 pixels, 1-bit",
-            "~1.5s full refresh",
-            "Holds image: no power!",
-        }
-    },
-    {
-        "I2C BUS",
-        {
-            "I2C = 2-wire serial",
-            "SCL=clock  SDA=data",
-            "Devices have addresses",
-            "Master picks by address",
-            "Slower: ~100-400 kHz",
-            "Badge: 0x20 and 0x60",
-        }
-    },
-    {
-        "TCA9534 EXPANDER",
-        {
-            "I2C I/O expander chip",
-            "Adds 8 GPIO via 2 wires",
-            "Saves 6 MCU pins",
-            "Buttons: active-LOW",
-            "Pressed = reads LOW",
-            "~btns = active-HIGH",
-        }
-    },
-    {
-        "ATECC608B CRYPTO",
-        {
-            "Hardware secure element",
-            "Keys stored inside chip",
-            "Keys never leave the IC",
-            "ECDSA, ECDH, SHA-256",
-            "HW TRNG: true random",
-            "I2C address: 0x60",
-        }
-    },
-    {
-        "DEEP SLEEP",
-        {
-            "ESP32 power modes:",
-            "Active:  ~240 mA",
-            "Modem:   ~20 mA",
-            "Light:   ~2 mA",
-            "Deep:    <10 uA (!)",
-            "Wake: button GPIO edge",
-        }
-    },
-    {
-        "BOARD OVERVIEW",
-        {
-            "SPI: CLK=11 MOSI=17",
-            "     CS=12  DC=13",
-            "I2C: SCL=9  SDA=10",
-            "Buttons: TCA9534 @0x20",
-            "Crypto: ATECC608B @0x60",
-            "Power:GPIO18 Wake:GPIO1",
-        }
-    },
-};
-
-static const GuideScreen SW_GUIDE[] = {
-    {
-        "C++ ON EMBEDDED",
-        {
-            "Runs as machine code",
-            "No OS, bare metal",
-            "You control every byte",
-            "Arduino wraps hardware",
-            "main.cpp: our whole app",
-            "Entry: setup() + loop()",
-        }
-    },
-    {
-        "INCLUDES & HEADERS",
-        {
-            "#include loads a header",
-            "<Wire.h>  = I2C library",
-            "<SPI.h>   = SPI library",
-            "<Arduino.h> = core API",
-            "badge_pins.h = our pins",
-            ".h=header .cpp=source",
-        }
-    },
-    {
-        "#DEFINE & MACROS",
-        {
-            "#define = text replace",
-            "Done before compiling",
-            "No type, no memory used",
-            "#define BTN_UP (1<<2)",
-            "Equals 0b00000100 = 4",
-            "Avoids 'magic numbers'",
-        }
-    },
-    {
-        "VARIABLES & TYPES",
-        {
-            "uint8_t  = 8-bit 0-255",
-            "uint32_t = 32-bit 0..4B",
-            "bool     = true/false",
-            "static   = persistent",
-            "g_ prefix = global var",
-            "Types matter on HW!",
-        }
-    },
-    {
-        "BITWISE OPERATORS",
-        {
-            "Buttons = 1 byte value",
-            "(1<<2) = 0b00000100",
-            "btns & BTN_UP  // test",
-            "btns | BTN_UP  // set",
-            "~btns       // invert",
-            "Active-LOW: pressed=0V",
-        }
-    },
-    {
-        "FUNCTIONS & SCOPE",
-        {
-            "static void fn_name() {",
-            "  // renders content",
-            "}",
-            "static = only this file",
-            "void = returns nothing",
-            "Used in dispatch_render",
-        }
-    },
-    {
-        "ENUM & STATE MACHINE",
-        {
-            "enum AppState {",
-            "  STATE_MENU,",
-            "  STATE_SYS_INFO, ...",
-            "};",
-            "g_state = active screen",
-            "switch() routes to draw",
-        }
-    },
-    {
-        "SETUP & LOOP",
-        {
-            "Arduino entry points:",
-            "setup(): runs once",
-            "  - init pins, display",
-            "  - set g_state = MENU",
-            "loop():  runs forever",
-            "  - poll btns, redraw",
-        }
-    },
-    {
-        "DISPATCH PATTERN",
-        {
-            "g_needs_redraw = true",
-            "  = redraw needed",
-            "dispatch_render() calls",
-            "  the right draw_ fn",
-            "Separates what/how:",
-            "logic > state > render",
-        }
-    },
-    {
-        "STRUCTS & ARRAYS",
-        {
-            "struct GuideScreen {",
-            "  const char* title;",
-            "  const char* lines[6];",
-            "};",
-            "HW_GUIDE[10] stores all",
-            "10 guide screens on HW",
-        }
-    },
-};
-
-#define HW_GUIDE_COUNT 10
-#define SW_GUIDE_COUNT 10
 
 // ── Button IRQ ────────────────────────────────────────────────────────────────
 
@@ -464,7 +196,7 @@ static void init_peripherals() {
     delay(50);  // let regulators settle
 
     Wire.begin(PIN_SDA, PIN_SCL);
-    Wire.setClock(100000);  // 100 kHz — required for ATECC608B
+    Wire.setClock(400000);  // 400 kHz fast-mode — TCA9534 and ATECC608B both support it
 
     Wire.beginTransmission(TCA9534_ADDR);
     Wire.write(TCA9534_CONFIG);
@@ -686,7 +418,35 @@ static void draw_menu() {
 
 // ── Draw: system info ─────────────────────────────────────────────────────────
 
+static const char* i2c_device_name(uint8_t addr) {
+    switch (addr) {
+        case 0x20: return "TCA9534 (buttons)";
+        case 0x60: return "ATECC608B (crypto)";
+        default:   return "";
+    }
+}
+
+static const char* relative_time(uint32_t ms_ago, char* buf, size_t bufsz) {
+    uint32_t secs = ms_ago / 1000;
+    if (secs < 60)        snprintf(buf, bufsz, "%us", (unsigned)secs);
+    else if (secs < 3600) snprintf(buf, bufsz, "%um", (unsigned)(secs / 60));
+    else                  snprintf(buf, bufsz, ">1h");
+    return buf;
+}
+
+// ── ATECC608B provisioning ────────────────────────────────────────────────────
+
+// Detect chip and load public key; sets g_atecc_available and g_atecc_ok.
 static void draw_sys_info() {
+    // Run I2C scan and generate RNG bytes fresh each time
+    uint8_t i2c_addrs[20]; int i2c_count = 0;
+    for (uint8_t a = 1; a < 127 && i2c_count < 20; a++) {
+        Wire.beginTransmission(a);
+        if (Wire.endTransmission() == 0) i2c_addrs[i2c_count++] = a;
+    }
+    uint8_t rng[16];
+    for (int i = 0; i < 4; i++) { uint32_t r = esp_random(); memcpy(&rng[i*4], &r, 4); }
+
     display.setFullWindow();
     display.firstPage();
     do {
@@ -695,108 +455,45 @@ static void draw_sys_info() {
         display.setTextColor(GxEPD_BLACK);
 
         char buf[36];
-        int y = 50;
+        int y = 38;
 
-        snprintf(buf, sizeof(buf), "Chip:  %s", ESP.getChipModel());
-        display.setCursor(8, y); display.print(buf); y += 18;
+        // Chip + clock
+        snprintf(buf, sizeof(buf), "%s %dMHz %dMB",
+                 ESP.getChipModel(), (int)ESP.getCpuFreqMHz(),
+                 (unsigned)(ESP.getFlashChipSize() / 1024 / 1024));
+        display.setCursor(8, y); display.print(buf); y += 16;
 
-        snprintf(buf, sizeof(buf), "Cores: %d @ %d MHz",
-                 ESP.getChipCores(), (int)ESP.getCpuFreqMHz());
-        display.setCursor(8, y); display.print(buf); y += 18;
+        // MAC address
+        snprintf(buf, sizeof(buf), "MAC: %s", WiFi.macAddress().c_str());
+        display.setCursor(8, y); display.print(buf); y += 16;
 
-        snprintf(buf, sizeof(buf), "Heap:  %u B free",
-                 (unsigned)ESP.getFreeHeap());
-        display.setCursor(8, y); display.print(buf); y += 18;
-
+        // Heap / PSRAM
         uint32_t psram = ESP.getPsramSize();
         if (psram > 0)
-            snprintf(buf, sizeof(buf), "PSRAM: %u MB", (unsigned)(psram / 1024 / 1024));
+            snprintf(buf, sizeof(buf), "Heap:%uB PSRAM:%uMB",
+                     (unsigned)ESP.getFreeHeap(), (unsigned)(psram/1024/1024));
         else
-            snprintf(buf, sizeof(buf), "PSRAM: not enabled");
-        display.setCursor(8, y); display.print(buf); y += 18;
+            snprintf(buf, sizeof(buf), "Heap: %u B free", (unsigned)ESP.getFreeHeap());
+        display.setCursor(8, y); display.print(buf); y += 16;
 
-        snprintf(buf, sizeof(buf), "Flash: %u MB",
-                 (unsigned)(ESP.getFlashChipSize() / 1024 / 1024));
-        display.setCursor(8, y); display.print(buf);
-
-        page_footer("CXL: back to menu");
-    } while (display.nextPage());
-    display.hibernate();
-}
-
-// ── Draw: button test ─────────────────────────────────────────────────────────
-
-static void draw_btn_test() {
-    display.setFullWindow();
-    display.firstPage();
-    do {
-        page_header("BUTTON TEST");
-        display.setFont(&FreeMono9pt7b);
-        display.setTextColor(GxEPD_BLACK);
-
-        // Two columns, three rows — label + filled/empty square
-        struct { const char* label; uint8_t mask; int col; int row; } btndef[] = {
-            {"UP  ", BTN_UP,     0, 0},
-            {"DWN ", BTN_DOWN,   1, 0},
-            {"LFT ", BTN_LEFT,   0, 1},
-            {"RGT ", BTN_RIGHT,  1, 1},
-            {"SEL ", BTN_SELECT, 0, 2},
-            {"CXL ", BTN_CANCEL, 1, 2},
-        };
-
-        for (auto& b : btndef) {
-            int x = (b.col == 0) ? 8 : 140;
-            int y = 54 + b.row * 30;
-            display.setCursor(x, y);
-            display.print(b.label);
-            if (g_btn_display & b.mask)
-                display.fillRect(x + 50, y - 12, 14, 14, GxEPD_BLACK);
-            else
-                display.drawRect(x + 50, y - 12, 14, 14, GxEPD_BLACK);
+        // I2C devices
+        display.drawFastHLine(0, y - 2, display.width(), GxEPD_BLACK); y += 4;
+        display.setCursor(8, y); display.print("I2C:"); y += 14;
+        for (int i = 0; i < i2c_count && y < 128; i++) {
+            snprintf(buf, sizeof(buf), " 0x%02X %s",
+                     i2c_addrs[i], i2c_device_name(i2c_addrs[i]));
+            display.setCursor(8, y); display.print(buf); y += 14;
         }
+        if (i2c_count == 0) { display.setCursor(8, y); display.print(" none"); y += 14; }
 
-        page_footer("Press buttons. CXL:back");
-    } while (display.nextPage());
-    display.hibernate();
-}
-
-// ── Draw: I2C scanner ─────────────────────────────────────────────────────────
-
-static const char* i2c_device_name(uint8_t addr) {
-    if (addr == 0x20) return "TCA9534  (buttons)";
-    if (addr == 0x60) return "ATECC608B (crypto)";
-    return "(unknown)";
-}
-
-static void run_i2c_scan() {
-    g_i2c_count = 0;
-    for (uint8_t a = 1; a < 127 && g_i2c_count < 20; a++) {
-        Wire.beginTransmission(a);
-        if (Wire.endTransmission() == 0)
-            g_i2c_addrs[g_i2c_count++] = a;
-    }
-}
-
-static void draw_i2c_scan() {
-    display.setFullWindow();
-    display.firstPage();
-    do {
-        page_header("I2C SCANNER");
-        display.setFont(&FreeMono9pt7b);
-        display.setTextColor(GxEPD_BLACK);
-
-        if (g_i2c_count == 0) {
-            display.setCursor(8, 54);
-            display.print("No devices found.");
-        } else {
-            int y = 50;
-            for (int i = 0; i < g_i2c_count && y < 138; i++, y += 18) {
-                char buf[36];
-                snprintf(buf, sizeof(buf), "0x%02X  %s",
-                         g_i2c_addrs[i], i2c_device_name(g_i2c_addrs[i]));
-                display.setCursor(8, y);
-                display.print(buf);
-            }
+        // RNG bytes
+        display.drawFastHLine(0, y, display.width(), GxEPD_BLACK); y += 10;
+        display.setCursor(8, y); display.print("RNG:"); y += 14;
+        for (int row = 0; row < 2 && y < 158; row++, y += 14) {
+            snprintf(buf, sizeof(buf), " %02X%02X %02X%02X %02X%02X %02X%02X",
+                     rng[row*8+0], rng[row*8+1], rng[row*8+2], rng[row*8+3],
+                     rng[row*8+4], rng[row*8+5], rng[row*8+6], rng[row*8+7]);
+            display.setCursor(8, y); display.print(buf);
         }
 
         page_footer("CXL: back to menu");
@@ -804,128 +501,6 @@ static void draw_i2c_scan() {
     display.hibernate();
 }
 
-// ── Draw: RNG / Crypto ────────────────────────────────────────────────────────
-
-static void gen_rng() {
-    for (int i = 0; i < 4; i++) {
-        uint32_t r = esp_random();
-        memcpy(&g_rng_bytes[i * 4], &r, 4);
-    }
-}
-
-static void draw_rng() {
-    display.setFullWindow();
-    display.firstPage();
-    do {
-        page_header("RNG / CRYPTO");
-        display.setFont(&FreeMono9pt7b);
-        display.setTextColor(GxEPD_BLACK);
-
-        display.setCursor(8, 50);
-        display.print("ATECC608B @ 0x60");
-
-        display.setCursor(8, 70);
-        display.print("HW random (ESP32 TRNG):");
-
-        // 16 bytes as 4 rows of 4 bytes
-        for (int row = 0; row < 4; row++) {
-            char buf[16];
-            snprintf(buf, sizeof(buf), "%02X %02X %02X %02X",
-                     g_rng_bytes[row*4+0], g_rng_bytes[row*4+1],
-                     g_rng_bytes[row*4+2], g_rng_bytes[row*4+3]);
-            display.setCursor(8, 92 + row * 14);
-            display.print(buf);
-        }
-
-        page_footer("SEL:regen  CXL:back");
-    } while (display.nextPage());
-    display.hibernate();
-}
-
-// ── Draw: display test ────────────────────────────────────────────────────────
-
-#define PATTERN_COUNT 4
-static const char* PATTERN_NAMES[PATTERN_COUNT] = {
-    "Checkerboard",
-    "Horiz stripes",
-    "Vert stripes",
-    "Border+cross",
-};
-
-static void draw_display_test() {
-    display.setFullWindow();
-    display.firstPage();
-    do {
-        display.fillScreen(GxEPD_WHITE);
-
-        switch (g_disp_pattern) {
-            case 0:  // Checkerboard — 8×8 blocks
-                for (int by = 0; by < 22; by++)
-                    for (int bx = 0; bx < 33; bx++)
-                        if ((bx + by) % 2 == 0)
-                            display.fillRect(bx*8, by*8, 8, 8, GxEPD_BLACK);
-                break;
-
-            case 1:  // Horizontal stripes — 8px on, 8px off
-                for (int y = 0; y < 176; y += 16)
-                    display.fillRect(0, y, 264, 8, GxEPD_BLACK);
-                break;
-
-            case 2:  // Vertical stripes — 8px on, 8px off
-                for (int x = 0; x < 264; x += 16)
-                    display.fillRect(x, 0, 8, 176, GxEPD_BLACK);
-                break;
-
-            case 3:  // Double border + X diagonals
-                display.drawRect(0, 0, 264, 176, GxEPD_BLACK);
-                display.drawRect(2, 2, 260, 172, GxEPD_BLACK);
-                display.drawLine(0, 0, 263, 175, GxEPD_BLACK);
-                display.drawLine(263, 0, 0, 175, GxEPD_BLACK);
-                break;
-        }
-
-        // Overlay footer
-        display.fillRect(0, 156, 264, 20, GxEPD_WHITE);
-        display.drawFastHLine(0, 156, 264, GxEPD_BLACK);
-        display.setFont(&FreeMono9pt7b);
-        display.setTextColor(GxEPD_BLACK);
-        char buf[28];
-        snprintf(buf, sizeof(buf), "%d/%d: %-12s L/R",
-                 g_disp_pattern + 1, PATTERN_COUNT, PATTERN_NAMES[g_disp_pattern]);
-        display.setCursor(8, 171);
-        display.print(buf);
-    } while (display.nextPage());
-    display.hibernate();
-}
-
-// ── Draw: guide ───────────────────────────────────────────────────────────────
-
-static void draw_guide() {
-    const GuideScreen& scr = g_guide_src[g_guide_page];
-
-    display.setFullWindow();
-    display.firstPage();
-    do {
-        guide_header(scr.title, g_guide_page, g_guide_count);
-
-        display.setFont(&FreeMono9pt7b);
-        display.setTextColor(GxEPD_BLACK);
-
-        // 18px spacing = yAdvance of FreeMono9pt7b, no vertical overlap
-        int y = 50;
-        for (int i = 0; i < 6 && scr.lines[i] != nullptr; i++, y += 18) {
-            display.setCursor(8, y);
-            display.print(scr.lines[i]);
-        }
-
-        page_footer("LFT/RGT  CXL:back");
-    } while (display.nextPage());
-    display.hibernate();
-}
-
-// ── ATECC608B provisioning ────────────────────────────────────────────────────
-
-// Detect chip and load public key; sets g_atecc_available and g_atecc_ok.
 // If chip is found but not yet provisioned, returns false so caller can
 // route to STATE_ATECC_INTRO.
 static bool check_atecc() {
@@ -1222,6 +797,7 @@ static void shutdown_espnow() {
     g_cap_pending     = false;
     g_cap_peer_idx    = -1;
     g_challenge_flag  = false;
+    g_partial_count   = 0;
     g_ping_pending    = false;
     g_pong_flag       = false;
     g_last_rtt        = -1;
@@ -1302,7 +878,12 @@ static void espnow_tab_header(const char* title) {
 }
 
 static void draw_espnow_beacon() {
-    display.setFullWindow();
+    if (++g_partial_count >= 10) {
+        g_partial_count = 0;
+        display.setFullWindow();
+    } else {
+        display.setPartialWindow(0, 0, display.width(), display.height());
+    }
     display.firstPage();
     do {
         espnow_tab_header("BEACON");
@@ -1357,7 +938,12 @@ static void draw_espnow_beacon() {
 }
 
 static void draw_espnow_peers() {
-    display.setFullWindow();
+    if (++g_partial_count >= 10) {
+        g_partial_count = 0;
+        display.setFullWindow();
+    } else {
+        display.setPartialWindow(0, 0, display.width(), display.height());
+    }
     display.firstPage();
     do {
         espnow_tab_header("PEERS");
@@ -1442,7 +1028,12 @@ static void draw_espnow_peers() {
 }
 
 static void draw_espnow_inbox() {
-    display.setFullWindow();
+    if (++g_partial_count >= 10) {
+        g_partial_count = 0;
+        display.setFullWindow();
+    } else {
+        display.setPartialWindow(0, 0, display.width(), display.height());
+    }
     display.firstPage();
     do {
         espnow_tab_header("INBOX");
@@ -1574,9 +1165,9 @@ static void draw_espnow_target() {
 
         display.setFont(&FreeMono9pt7b);
 
-        const char* options[] = { "PING", "MESSAGE", "CAPTURE" };
-        for (int i = 0; i < 3; i++) {
-            int y = 54 + i * 28;
+        const char* options[] = { "PING", "CAPTURE" };
+        for (int i = 0; i < 2; i++) {
+            int y = 64 + i * 32;
             if (i == g_target_cursor) {
                 display.fillRect(0, y - 14, display.width(), 18, GxEPD_BLACK);
                 display.setTextColor(GxEPD_WHITE);
@@ -1593,63 +1184,13 @@ static void draw_espnow_target() {
     display.hibernate();
 }
 
-static void draw_espnow_msg() {
-    display.setFullWindow();
-    display.firstPage();
-    do {
-        const char* peer_name = (g_target_peer_idx >= 0) ? g_peers[g_target_peer_idx].name : "?";
-        char title[32];
-        snprintf(title, sizeof(title), "MSG TO: %s", peer_name);
-        page_header(title);
-
-        display.setFont(&FreeMono9pt7b);
-        display.setTextColor(GxEPD_BLACK);
-
-        // Show message buffer with highlighted cursor position
-        int len = max((int)strlen(g_msg_buf), g_msg_pos + 1);
-        if (len > 12) len = 12;
-        for (int i = 0; i < len; i++) {
-            int x = 8 + i * 20;
-            char ch = (i < (int)strlen(g_msg_buf)) ? g_msg_buf[i] : ' ';
-            if (i == g_msg_pos) {
-                display.fillRect(x - 2, 34, 18, 20, GxEPD_BLACK);
-                display.setTextColor(GxEPD_WHITE);
-            } else {
-                display.setTextColor(GxEPD_BLACK);
-            }
-            display.setCursor(x, 50);
-            display.print(ch);
-        }
-        display.setTextColor(GxEPD_BLACK);
-
-        int prev_idx = (g_msg_char_idx - 1 + EDIT_CHARSET_LEN) % EDIT_CHARSET_LEN;
-        int next_idx = (g_msg_char_idx + 1) % EDIT_CHARSET_LEN;
-
-        display.drawFastHLine(8, 66, display.width() - 16, GxEPD_BLACK);
-        display.setCursor(8, 84);
-        display.print("UP  ["); display.print(EDIT_CHARSET[prev_idx]); display.print("]");
-        display.setFont(&FreeMonoBold9pt7b);
-        display.setCursor(8, 102);
-        display.print("    ["); display.print(EDIT_CHARSET[g_msg_char_idx]); display.print("] <- current");
-        display.setFont(&FreeMono9pt7b);
-        display.setCursor(8, 118);
-        display.print("DN  ["); display.print(EDIT_CHARSET[next_idx]); display.print("]");
-
-        page_footer("RGT:nxt SEL:snd CXL");
-    } while (display.nextPage());
-    display.hibernate();
-}
-
-static const char* relative_time(uint32_t ms_ago, char* buf, size_t bufsz) {
-    uint32_t secs = ms_ago / 1000;
-    if (secs < 60)        snprintf(buf, bufsz, "%us", (unsigned)secs);
-    else if (secs < 3600) snprintf(buf, bufsz, "%um", (unsigned)(secs / 60));
-    else                  snprintf(buf, bufsz, ">1h");
-    return buf;
-}
-
 static void draw_espnow_log() {
-    display.setFullWindow();
+    if (++g_partial_count >= 10) {
+        g_partial_count = 0;
+        display.setFullWindow();
+    } else {
+        display.setPartialWindow(0, 0, display.width(), display.height());
+    }
     display.firstPage();
     do {
         espnow_tab_header("LOG");
@@ -1701,7 +1242,12 @@ static void draw_espnow_log() {
 }
 
 static void draw_espnow_score() {
-    display.setFullWindow();
+    if (++g_partial_count >= 10) {
+        g_partial_count = 0;
+        display.setFullWindow();
+    } else {
+        display.setPartialWindow(0, 0, display.width(), display.height());
+    }
     display.firstPage();
     do {
         espnow_tab_header("SCORE");
@@ -1766,18 +1312,12 @@ static void draw_espnow() {
 
 static void dispatch_render() {
     switch (g_state) {
-        case STATE_HOME:         draw_home_screen();  break;
-        case STATE_MENU:         draw_menu();         break;
-        case STATE_SYS_INFO:     draw_sys_info();     break;
-        case STATE_BTN_TEST:     draw_btn_test();     break;
-        case STATE_I2C_SCAN:     draw_i2c_scan();     break;
-        case STATE_RNG:          draw_rng();          break;
-        case STATE_DISPLAY_TEST: draw_display_test(); break;
-        case STATE_GUIDE:        draw_guide();        break;
+        case STATE_HOME:          draw_home_screen();         break;
+        case STATE_MENU:          draw_menu();                break;
+        case STATE_SYS_INFO:      draw_sys_info();            break;
         case STATE_ESPNOW:        draw_espnow();              break;
         case STATE_ESPNOW_EDIT:   draw_espnow_edit();         break;
         case STATE_ESPNOW_TARGET: draw_espnow_target();       break;
-        case STATE_ESPNOW_MSG:    draw_espnow_msg();          break;
         case STATE_ATECC_INTRO:   draw_atecc_intro();         break;
         case STATE_ATECC_DONE:    draw_atecc_done(g_atecc_ok); break;
     }
@@ -1805,26 +1345,9 @@ static void handle_buttons(uint8_t pressed) {
             if (pressed & BTN_SELECT) {
                 switch (g_cursor) {
                     case 0: g_state = STATE_SYS_INFO; break;
-                    case 1: g_btn_display = read_buttons(); g_state = STATE_BTN_TEST; break;
-                    case 2: run_i2c_scan(); g_state = STATE_I2C_SCAN; break;
-                    case 3: gen_rng();      g_state = STATE_RNG;      break;
-                    case 4: g_state = STATE_DISPLAY_TEST; break;
-                    case 5:
-                        g_guide_src   = HW_GUIDE;
-                        g_guide_count = HW_GUIDE_COUNT;
-                        g_guide_page  = 0;
-                        g_state = STATE_GUIDE;
-                        break;
-                    case 6:
-                        g_guide_src   = SW_GUIDE;
-                        g_guide_count = SW_GUIDE_COUNT;
-                        g_guide_page  = 0;
-                        g_state = STATE_GUIDE;
-                        break;
-                    case 7:
+                    case 1:
                         init_espnow();
                         if (!g_atecc_ok && !check_atecc() && g_atecc_available) {
-                            // Chip found but not provisioned — show onboarding
                             g_state = STATE_ATECC_INTRO;
                         } else {
                             g_state = STATE_ESPNOW;
@@ -1834,36 +1357,6 @@ static void handle_buttons(uint8_t pressed) {
                 g_needs_redraw = true;
             }
             if (pressed & BTN_CANCEL) { g_state = STATE_HOME; g_needs_redraw = true; }
-            break;
-
-        case STATE_BTN_TEST:
-            // State changes are handled by the btns-changed check in loop();
-            // only CANCEL exits.
-            if (pressed & BTN_CANCEL)
-                { g_state = STATE_MENU; g_needs_redraw = true; }
-            break;
-
-        case STATE_RNG:
-            if (pressed & BTN_SELECT) { gen_rng(); g_needs_redraw = true; }
-            if (pressed & BTN_CANCEL) { g_state = STATE_MENU; g_needs_redraw = true; }
-            break;
-
-        case STATE_DISPLAY_TEST:
-            if (pressed & BTN_LEFT)
-                { g_disp_pattern = (g_disp_pattern - 1 + PATTERN_COUNT) % PATTERN_COUNT; g_needs_redraw = true; }
-            if (pressed & BTN_RIGHT)
-                { g_disp_pattern = (g_disp_pattern + 1) % PATTERN_COUNT; g_needs_redraw = true; }
-            if (pressed & BTN_CANCEL)
-                { g_state = STATE_MENU; g_needs_redraw = true; }
-            break;
-
-        case STATE_GUIDE:
-            if (pressed & BTN_LEFT)
-                { g_guide_page = (g_guide_page - 1 + g_guide_count) % g_guide_count; g_needs_redraw = true; }
-            if (pressed & BTN_RIGHT)
-                { g_guide_page = (g_guide_page + 1) % g_guide_count; g_needs_redraw = true; }
-            if (pressed & BTN_CANCEL)
-                { g_state = STATE_MENU; g_needs_redraw = true; }
             break;
 
         case STATE_ESPNOW:
@@ -1909,9 +1402,9 @@ static void handle_buttons(uint8_t pressed) {
 
         case STATE_ESPNOW_TARGET:
             if (pressed & BTN_UP)
-                { g_target_cursor = (g_target_cursor - 1 + 3) % 3; g_needs_redraw = true; }
+                { g_target_cursor = (g_target_cursor - 1 + 2) % 2; g_needs_redraw = true; }
             if (pressed & BTN_DOWN)
-                { g_target_cursor = (g_target_cursor + 1) % 3; g_needs_redraw = true; }
+                { g_target_cursor = (g_target_cursor + 1) % 2; g_needs_redraw = true; }
             if (pressed & BTN_SELECT) {
                 if (g_target_cursor == 0) {
                     // PING
@@ -1927,13 +1420,6 @@ static void handle_buttons(uint8_t pressed) {
                     Serial.printf("[espnow] ping -> %s\n", g_peers[g_target_peer_idx].name);
                     g_espnow_tab = 0;
                     g_state = STATE_ESPNOW;
-                } else if (g_target_cursor == 1) {
-                    // MESSAGE
-                    memset(g_msg_buf, 0, sizeof(g_msg_buf));
-                    g_msg_buf[0]    = 'A';
-                    g_msg_pos       = 0;
-                    g_msg_char_idx  = 0;
-                    g_state = STATE_ESPNOW_MSG;
                 } else {
                     // CAPTURE — send a signed challenge nonce to the target
                     ensure_unicast_peer(g_peers[g_target_peer_idx].mac);
@@ -1962,57 +1448,7 @@ static void handle_buttons(uint8_t pressed) {
                 { g_state = STATE_ESPNOW; g_espnow_tab = 1; g_needs_redraw = true; }
             break;
 
-        case STATE_ESPNOW_MSG:
-            if (pressed & BTN_UP) {
-                g_msg_char_idx = (g_msg_char_idx - 1 + EDIT_CHARSET_LEN) % EDIT_CHARSET_LEN;
-                g_msg_buf[g_msg_pos] = EDIT_CHARSET[g_msg_char_idx];
-                g_needs_redraw = true;
-            }
-            if (pressed & BTN_DOWN) {
-                g_msg_char_idx = (g_msg_char_idx + 1) % EDIT_CHARSET_LEN;
-                g_msg_buf[g_msg_pos] = EDIT_CHARSET[g_msg_char_idx];
-                g_needs_redraw = true;
-            }
-            if (pressed & BTN_RIGHT) {
-                if (g_msg_pos < 11) {
-                    g_msg_pos++;
-                    if (g_msg_pos >= (int)strlen(g_msg_buf)) g_msg_buf[g_msg_pos] = 'A';
-                    g_msg_char_idx = 0;
-                    for (int i = 0; i < EDIT_CHARSET_LEN; i++)
-                        if (EDIT_CHARSET[i] == g_msg_buf[g_msg_pos]) { g_msg_char_idx = i; break; }
-                    g_needs_redraw = true;
-                }
-            }
-            if (pressed & BTN_LEFT) {
-                if (g_msg_pos > 0) {
-                    g_msg_pos--;
-                    g_msg_char_idx = 0;
-                    for (int i = 0; i < EDIT_CHARSET_LEN; i++)
-                        if (EDIT_CHARSET[i] == g_msg_buf[g_msg_pos]) { g_msg_char_idx = i; break; }
-                    g_needs_redraw = true;
-                }
-            }
-            if (pressed & BTN_SELECT) {
-                g_msg_buf[g_msg_pos + 1] = '\0';
-                // Trim trailing spaces
-                int l = strlen(g_msg_buf);
-                while (l > 1 && g_msg_buf[l-1] == ' ') g_msg_buf[--l] = '\0';
-                // Send as unicast MSG_TEXT
-                ensure_unicast_peer(g_peers[g_target_peer_idx].mac);
-                BeaconMsg txt = {};
-                txt.type = MSG_TEXT;
-                strncpy(txt.name, g_callsign, sizeof(txt.name));
-                WiFi.macAddress(txt.mac);
-                txt.counter = ++g_send_count;
-                strncpy(txt.text, g_msg_buf, sizeof(txt.text));
-                esp_now_send(g_peers[g_target_peer_idx].mac, (uint8_t*)&txt, sizeof(txt));
-                Serial.printf("[espnow] msg -> %s: \"%s\"\n", g_peers[g_target_peer_idx].name, g_msg_buf);
-                g_state = STATE_ESPNOW; g_espnow_tab = 1;
-                g_needs_redraw = true;
-            }
-            if (pressed & BTN_CANCEL)
-                { g_state = STATE_ESPNOW_TARGET; g_needs_redraw = true; }
-            break;
+
 
         case STATE_ESPNOW_EDIT:
             if (pressed & BTN_UP) {
@@ -2139,19 +1575,13 @@ void loop() {
         dispatch_render();
     }
 
-    // Only read I²C when TCA9534 asserts the IRQ line, or in BTN_TEST (needs live state)
+    // Only read I²C when TCA9534 asserts the IRQ line
     uint8_t btns = g_last_btns;
-    if (g_btn_irq || g_state == STATE_BTN_TEST) {
+    if (g_btn_irq) {
         g_btn_irq = false;
         btns = read_buttons();
     }
     uint8_t pressed = btns & ~g_last_btns;  // rising-edge detection
-
-    // In button test, redraw whenever held-button state changes
-    if (g_state == STATE_BTN_TEST && btns != g_last_btns) {
-        g_btn_display  = btns;
-        g_needs_redraw = true;
-    }
 
     g_last_btns = btns;
     handle_buttons(pressed);
@@ -2236,5 +1666,5 @@ void loop() {
         go_to_sleep();
     }
 
-    delay(10);
+    delay(2);
 }
