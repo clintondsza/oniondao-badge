@@ -1,4 +1,4 @@
-<!-- Thanks for contributing to the NULL City Badge!
+<!-- Thanks for contributing to the OnionDAO Badge!
      See docs/CONTRIBUTING.md for the full guidelines. -->
 
 ## What is this?

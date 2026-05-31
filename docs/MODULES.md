@@ -1,6 +1,6 @@
 # Swappable Modules
 
-The NULL City Badge ships with **two flexible module slots** that share a
+The OnionDAO Badge ships with **two flexible module slots** that share a
 common set of GPIOs on the side expansion ports. The schematics for each
 module live next to the main board:
 

@@ -1,4 +1,4 @@
-# NULL City Badge — Hardware Reference
+# OnionDAO Badge — Hardware Reference
 
 Physical pin locations, connector pinouts, and component callouts captured
 from the board photos. Use this as a soldering reference before any rework.
@@ -194,7 +194,7 @@ Physical layout (front face, right side):
 **Before soldering:**
 - Disconnect the LiPo battery (unplug J2)
 - Double-check orientation on any IC — U5 (TCA9534) and U15 (ATECC608B)
-  are small SMD packages; consult `pcb/null-city-badge.kicad_sch` for
+  are small SMD packages; consult `pcb/oniondao-badge.kicad_sch` for
   pin 1 orientation
 - The display FPC connector (J4) is ZIF (zero insertion force) — lift the
   locking tab before inserting or removing the ribbon cable

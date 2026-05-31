@@ -1,6 +1,6 @@
 *.lck
 pcb/fp-info-cache
-null-city-badge-backups/*
+oniondao-badge-backups/*
 
 # macOS
 .DS_Store
@@ -36,9 +36,27 @@ fp-info-cache
 # Exported BOM files
 *.xml
 *.csv
+# ...but keep ESP-IDF partition tables (firmware build config, not a BOM export)
+!partitions.csv
 
 # Archived Backups
 **/*-backups/*.zip
 
 # Local project settings
 *.kicad_prl
+
+# ESP-IDF firmware build artifacts (generated; also ignored per-project)
+**/build/
+sdkconfig
+sdkconfig.old
+**/managed_components/
+dependencies.lock
+
+# Editor / IDE settings — machine-specific (absolute toolchain paths, serial
+# ports). Each contributor generates their own; see
+# software/guides/esp-idf-vscode-setup.md
+.vscode/
+
+# VS Code "Local History" extension snapshots
+.history/
+**/.history/
