@@ -70,10 +70,12 @@ struct PeerEntry {
     int8_t   rssi;
     uint32_t last_seen;
     uint32_t first_seen;
-    bool     verified;      // ECDSA signature verified
-    bool     sig_present;   // peer sent a signature (false = old firmware)
-    bool     blocked;       // user blocked this peer — pings silently ignored
-    uint8_t  pubkey[64];    // their P-256 public key
+    bool     verified;          // ECDSA signature verified
+    bool     sig_present;       // peer sent a signature (false = old firmware)
+    bool     blocked;           // user blocked or auto-blocked — pings silently ignored
+    uint8_t  pubkey[64];        // their P-256 public key
+    uint8_t  ping_count;        // pings received in current rate-limit window
+    uint32_t ping_window_start; // millis() when current window began
 };
 
 struct InboxEntry {
@@ -83,8 +85,10 @@ struct InboxEntry {
     uint32_t timestamp;
 };
 
-static const int MAX_PEERS = 500;
-static const int MAX_INBOX = 200;
+static const int MAX_PEERS       = 500;
+static const int MAX_INBOX       = 200;
+static const int PING_RATE_LIMIT = 5;      // max pings from one peer per window
+static const uint32_t PING_WINDOW_MS = 10000; // 10-second rolling window
 
 static volatile bool g_recv_flag   = false;
 static BeaconMsg     g_last_recv   = {};
@@ -657,15 +661,36 @@ static void on_promisc(void* buf, wifi_promiscuous_pkt_type_t type) {
     }
 }
 
+// Add peer with encryption. If peer already exists but was added without
+// encryption (e.g. as a ping target), upgrade it to encrypted in-place.
 static void ensure_unicast_peer(const uint8_t* mac) {
-    if (!esp_now_is_peer_exist(mac)) {
-        esp_now_peer_info_t peer = {};
-        memcpy(peer.peer_addr, mac, 6);
-        peer.channel = 0;
-        peer.encrypt = true;
-        memcpy(peer.lmk, ESPNOW_LMK, 16);
-        esp_now_add_peer(&peer);
+    esp_now_peer_info_t existing = {};
+    if (esp_now_get_peer(mac, &existing) == ESP_OK) {
+        if (!existing.encrypt) {
+            existing.encrypt = true;
+            memcpy(existing.lmk, ESPNOW_LMK, 16);
+            esp_now_mod_peer(&existing);
+        }
+        return;
     }
+    esp_now_peer_info_t peer = {};
+    memcpy(peer.peer_addr, mac, 6);
+    peer.channel = 0;
+    peer.encrypt = true;
+    memcpy(peer.lmk, ESPNOW_LMK, 16);
+    esp_now_add_peer(&peer);
+}
+
+// Add peer WITHOUT encryption so the target receives the frame even if
+// it has not registered us yet. ensure_unicast_peer() will upgrade to
+// encrypted once bidirectional communication is established.
+static void add_ping_peer(const uint8_t* mac) {
+    if (esp_now_is_peer_exist(mac)) return;
+    esp_now_peer_info_t peer = {};
+    memcpy(peer.peer_addr, mac, 6);
+    peer.channel = 0;
+    peer.encrypt = false;
+    esp_now_add_peer(&peer);
 }
 
 static void on_recv(const uint8_t* mac, const uint8_t* data, int len) {
@@ -703,19 +728,39 @@ static void on_recv(const uint8_t* mac, const uint8_t* data, int len) {
         g_inbox[0].counter   = msg.counter;
         g_inbox[0].timestamp = millis();
 
-        // Handle ping — queue a pong reply via main loop (silently drop if sender is blocked)
+        // Handle ping with three layers of protection:
         if (msg.type == MSG_PING) {
-            bool sender_blocked = false;
+            // 1. Known-peer check: ignore pings from MACs that never beaconed to us
+            int pidx = -1;
             for (int i = 0; i < g_peer_count; i++) {
-                if (memcmp(g_peers[i].mac, mac, 6) == 0 && g_peers[i].blocked) {
-                    sender_blocked = true; break;
-                }
+                if (memcmp(g_peers[i].mac, mac, 6) == 0) { pidx = i; break; }
             }
-            if (!sender_blocked) {
-                memcpy(g_pong_mac, mac, 6);
-                g_pong_flag = true;
-            } else {
+            if (pidx < 0) {
+                Serial.printf("[espnow] ping from unknown MAC ignored\n");
+            } else if (g_peers[pidx].blocked) {
+                // 2. Manual or auto-blocked
                 Serial.printf("[espnow] ping from blocked peer ignored\n");
+            } else {
+                // 3. Rate limit: max PING_RATE_LIMIT pings per PING_WINDOW_MS
+                uint32_t now = millis();
+                if (now - g_peers[pidx].ping_window_start > PING_WINDOW_MS) {
+                    g_peers[pidx].ping_window_start = now;
+                    g_peers[pidx].ping_count = 1;
+                } else {
+                    g_peers[pidx].ping_count++;
+                }
+                if (g_peers[pidx].ping_count > PING_RATE_LIMIT) {
+                    g_peers[pidx].blocked = true;
+                    Serial.printf("[espnow] rate-limited %s — auto-blocked\n",
+                                  g_peers[pidx].name);
+                    if (g_state == STATE_ESPNOW && g_espnow_tab == 1)
+                        g_needs_redraw = true;
+                } else {
+                    // All clear — upgrade sender to encrypted peer and send pong
+                    ensure_unicast_peer(mac);
+                    memcpy(g_pong_mac, mac, 6);
+                    g_pong_flag = true;
+                }
             }
         }
 
@@ -1447,8 +1492,8 @@ static void handle_buttons(uint8_t pressed) {
                 { g_target_cursor = (g_target_cursor + 1) % 3; g_needs_redraw = true; }
             if (pressed & BTN_SELECT) {
                 if (g_target_cursor == 0) {
-                    // PING
-                    ensure_unicast_peer(g_peers[g_target_peer_idx].mac);
+                    // PING — sent unencrypted so target receives it without prior registration
+                    add_ping_peer(g_peers[g_target_peer_idx].mac);
                     BeaconMsg ping = {};
                     ping.type = MSG_PING;
                     strncpy(ping.name, g_callsign, sizeof(ping.name));
