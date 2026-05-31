@@ -72,6 +72,7 @@ struct PeerEntry {
     uint32_t first_seen;
     bool     verified;      // ECDSA signature verified
     bool     sig_present;   // peer sent a signature (false = old firmware)
+    bool     blocked;       // user blocked this peer — pings silently ignored
     uint8_t  pubkey[64];    // their P-256 public key
 };
 
@@ -169,6 +170,8 @@ static AppState g_state        = STATE_MENU;
 static int      g_cursor       = 0;
 static bool     g_needs_redraw = true;
 static uint8_t  g_last_btns    = 0;
+static int      g_sysinfo_page = 0;   // 0=hardware 1=RNG
+static uint8_t  g_sysinfo_rng[16] = {};
 
 #define MENU_COUNT 2
 static const char* MENU_LABELS[MENU_COUNT] = {
@@ -438,65 +441,71 @@ static const char* relative_time(uint32_t ms_ago, char* buf, size_t bufsz) {
 
 // Detect chip and load public key; sets g_atecc_available and g_atecc_ok.
 static void draw_sys_info() {
-    // Run I2C scan and generate RNG bytes fresh each time
-    uint8_t i2c_addrs[20]; int i2c_count = 0;
-    for (uint8_t a = 1; a < 127 && i2c_count < 20; a++) {
-        Wire.beginTransmission(a);
-        if (Wire.endTransmission() == 0) i2c_addrs[i2c_count++] = a;
-    }
-    uint8_t rng[16];
-    for (int i = 0; i < 4; i++) { uint32_t r = esp_random(); memcpy(&rng[i*4], &r, 4); }
-
     display.setFullWindow();
     display.firstPage();
     do {
-        page_header("SYSTEM INFO");
+        char title[24];
+        snprintf(title, sizeof(title), "SYSTEM INFO  %d/2", g_sysinfo_page + 1);
+        page_header(title);
         display.setFont(&FreeMono9pt7b);
         display.setTextColor(GxEPD_BLACK);
 
         char buf[36];
-        int y = 38;
+        int y = 50;  // 18px safe line spacing throughout
 
-        // Chip + clock
-        snprintf(buf, sizeof(buf), "%s %dMHz %dMB",
-                 ESP.getChipModel(), (int)ESP.getCpuFreqMHz(),
-                 (unsigned)(ESP.getFlashChipSize() / 1024 / 1024));
-        display.setCursor(8, y); display.print(buf); y += 16;
+        if (g_sysinfo_page == 0) {
+            // Page 1 — hardware
+            snprintf(buf, sizeof(buf), "Chip: %s", ESP.getChipModel());
+            display.setCursor(8, y); display.print(buf); y += 18;
 
-        // MAC address
-        snprintf(buf, sizeof(buf), "MAC: %s", WiFi.macAddress().c_str());
-        display.setCursor(8, y); display.print(buf); y += 16;
+            snprintf(buf, sizeof(buf), "Clock: %d MHz", (int)ESP.getCpuFreqMHz());
+            display.setCursor(8, y); display.print(buf); y += 18;
 
-        // Heap / PSRAM
-        uint32_t psram = ESP.getPsramSize();
-        if (psram > 0)
-            snprintf(buf, sizeof(buf), "Heap:%uB PSRAM:%uMB",
-                     (unsigned)ESP.getFreeHeap(), (unsigned)(psram/1024/1024));
-        else
-            snprintf(buf, sizeof(buf), "Heap: %u B free", (unsigned)ESP.getFreeHeap());
-        display.setCursor(8, y); display.print(buf); y += 16;
+            snprintf(buf, sizeof(buf), "Flash: %u MB",
+                     (unsigned)(ESP.getFlashChipSize() / 1024 / 1024));
+            display.setCursor(8, y); display.print(buf); y += 18;
 
-        // I2C devices
-        display.drawFastHLine(0, y - 2, display.width(), GxEPD_BLACK); y += 4;
-        display.setCursor(8, y); display.print("I2C:"); y += 14;
-        for (int i = 0; i < i2c_count && y < 128; i++) {
-            snprintf(buf, sizeof(buf), " 0x%02X %s",
-                     i2c_addrs[i], i2c_device_name(i2c_addrs[i]));
-            display.setCursor(8, y); display.print(buf); y += 14;
-        }
-        if (i2c_count == 0) { display.setCursor(8, y); display.print(" none"); y += 14; }
+            uint32_t psram = ESP.getPsramSize();
+            snprintf(buf, sizeof(buf), "PSRAM: %u MB",
+                     psram > 0 ? (unsigned)(psram / 1024 / 1024) : 0);
+            display.setCursor(8, y); display.print(buf); y += 18;
 
-        // RNG bytes
-        display.drawFastHLine(0, y, display.width(), GxEPD_BLACK); y += 10;
-        display.setCursor(8, y); display.print("RNG:"); y += 14;
-        for (int row = 0; row < 2 && y < 158; row++, y += 14) {
-            snprintf(buf, sizeof(buf), " %02X%02X %02X%02X %02X%02X %02X%02X",
-                     rng[row*8+0], rng[row*8+1], rng[row*8+2], rng[row*8+3],
-                     rng[row*8+4], rng[row*8+5], rng[row*8+6], rng[row*8+7]);
+            snprintf(buf, sizeof(buf), "Heap:  %u KB free",
+                     (unsigned)(ESP.getFreeHeap() / 1024));
+            display.setCursor(8, y); display.print(buf); y += 18;
+
+            snprintf(buf, sizeof(buf), "MAC: %s", WiFi.macAddress().c_str());
             display.setCursor(8, y); display.print(buf);
+
+        } else {
+            // Page 2 — I2C devices + RNG
+            display.setCursor(8, y); display.print("I2C devices:"); y += 18;
+
+            uint8_t i2c_addrs[20]; int i2c_count = 0;
+            for (uint8_t a = 1; a < 127 && i2c_count < 20; a++) {
+                Wire.beginTransmission(a);
+                if (Wire.endTransmission() == 0) i2c_addrs[i2c_count++] = a;
+            }
+            for (int i = 0; i < i2c_count && y < 120; i++, y += 18) {
+                snprintf(buf, sizeof(buf), " 0x%02X %s",
+                         i2c_addrs[i], i2c_device_name(i2c_addrs[i]));
+                display.setCursor(8, y); display.print(buf);
+            }
+            if (i2c_count == 0) { display.setCursor(8, y); display.print(" none"); y += 18; }
+
+            display.drawFastHLine(8, y + 4, display.width() - 16, GxEPD_BLACK); y += 14;
+            display.setCursor(8, y); display.print("RNG:"); y += 18;
+            for (int row = 0; row < 2 && y < 158; row++, y += 18) {
+                snprintf(buf, sizeof(buf), "%02X%02X %02X%02X %02X%02X %02X%02X",
+                         g_sysinfo_rng[row*8+0], g_sysinfo_rng[row*8+1],
+                         g_sysinfo_rng[row*8+2], g_sysinfo_rng[row*8+3],
+                         g_sysinfo_rng[row*8+4], g_sysinfo_rng[row*8+5],
+                         g_sysinfo_rng[row*8+6], g_sysinfo_rng[row*8+7]);
+                display.setCursor(8, y); display.print(buf);
+            }
         }
 
-        page_footer("CXL: back to menu");
+        page_footer("L/R:page  CXL:back");
     } while (display.nextPage());
     display.hibernate();
 }
@@ -694,10 +703,20 @@ static void on_recv(const uint8_t* mac, const uint8_t* data, int len) {
         g_inbox[0].counter   = msg.counter;
         g_inbox[0].timestamp = millis();
 
-        // Handle ping — queue a pong reply via main loop
+        // Handle ping — queue a pong reply via main loop (silently drop if sender is blocked)
         if (msg.type == MSG_PING) {
-            memcpy(g_pong_mac, mac, 6);
-            g_pong_flag = true;
+            bool sender_blocked = false;
+            for (int i = 0; i < g_peer_count; i++) {
+                if (memcmp(g_peers[i].mac, mac, 6) == 0 && g_peers[i].blocked) {
+                    sender_blocked = true; break;
+                }
+            }
+            if (!sender_blocked) {
+                memcpy(g_pong_mac, mac, 6);
+                g_pong_flag = true;
+            } else {
+                Serial.printf("[espnow] ping from blocked peer ignored\n");
+            }
         }
 
         // Handle pong — measure RTT
@@ -985,11 +1004,15 @@ static void draw_espnow_peers() {
                 display.setCursor(8, y_name);
                 display.print(g_peers[idx].name);
 
-                // Right-side indicators: [V] verified, [!] spoof, [E] encrypted
-                // Layout: [V] at x=194, [E] at x=227 (3-char each × 11px = 33px)
+                // Right-side indicators: [B] blocked, [V]/[!] sig, [E] encrypted
+                // Layout (right to left): [E] x=227, [V]/[!] x=194, [B] x=161
                 esp_now_peer_info_t pi = {};
                 bool encrypted = (esp_now_get_peer(g_peers[idx].mac, &pi) == ESP_OK && pi.encrypt);
 
+                if (g_peers[idx].blocked) {
+                    display.setCursor(161, y_name);
+                    display.print("[B]");
+                }
                 if (g_peers[idx].sig_present) {
                     display.setCursor(194, y_name);
                     display.print(g_peers[idx].verified ? "[V]" : "[!]");
@@ -1165,9 +1188,10 @@ static void draw_espnow_target() {
 
         display.setFont(&FreeMono9pt7b);
 
-        const char* options[] = { "PING", "CAPTURE" };
-        for (int i = 0; i < 2; i++) {
-            int y = 64 + i * 32;
+        bool is_blocked = (g_target_peer_idx >= 0) && g_peers[g_target_peer_idx].blocked;
+        const char* options[] = { "PING", "CAPTURE", is_blocked ? "UNBLOCK" : "BLOCK" };
+        for (int i = 0; i < 3; i++) {
+            int y = 54 + i * 28;
             if (i == g_target_cursor) {
                 display.fillRect(0, y - 14, display.width(), 18, GxEPD_BLACK);
                 display.setTextColor(GxEPD_WHITE);
@@ -1344,7 +1368,14 @@ static void handle_buttons(uint8_t pressed) {
                 { g_cursor = (g_cursor + 1) % MENU_COUNT; g_needs_redraw = true; }
             if (pressed & BTN_SELECT) {
                 switch (g_cursor) {
-                    case 0: g_state = STATE_SYS_INFO; break;
+                    case 0:
+                        g_sysinfo_page = 0;
+                        for (int i = 0; i < 4; i++) {
+                            uint32_t r = esp_random();
+                            memcpy(&g_sysinfo_rng[i*4], &r, 4);
+                        }
+                        g_state = STATE_SYS_INFO;
+                        break;
                     case 1:
                         init_espnow();
                         if (!g_atecc_ok && !check_atecc() && g_atecc_available) {
@@ -1357,6 +1388,15 @@ static void handle_buttons(uint8_t pressed) {
                 g_needs_redraw = true;
             }
             if (pressed & BTN_CANCEL) { g_state = STATE_HOME; g_needs_redraw = true; }
+            break;
+
+        case STATE_SYS_INFO:
+            if (pressed & BTN_LEFT)
+                { g_sysinfo_page = (g_sysinfo_page + 1) % 2; g_needs_redraw = true; }
+            if (pressed & BTN_RIGHT)
+                { g_sysinfo_page = (g_sysinfo_page + 1) % 2; g_needs_redraw = true; }
+            if (pressed & BTN_CANCEL)
+                { g_state = STATE_MENU; g_needs_redraw = true; }
             break;
 
         case STATE_ESPNOW:
@@ -1402,9 +1442,9 @@ static void handle_buttons(uint8_t pressed) {
 
         case STATE_ESPNOW_TARGET:
             if (pressed & BTN_UP)
-                { g_target_cursor = (g_target_cursor - 1 + 2) % 2; g_needs_redraw = true; }
+                { g_target_cursor = (g_target_cursor - 1 + 3) % 3; g_needs_redraw = true; }
             if (pressed & BTN_DOWN)
-                { g_target_cursor = (g_target_cursor + 1) % 2; g_needs_redraw = true; }
+                { g_target_cursor = (g_target_cursor + 1) % 3; g_needs_redraw = true; }
             if (pressed & BTN_SELECT) {
                 if (g_target_cursor == 0) {
                     // PING
@@ -1420,7 +1460,7 @@ static void handle_buttons(uint8_t pressed) {
                     Serial.printf("[espnow] ping -> %s\n", g_peers[g_target_peer_idx].name);
                     g_espnow_tab = 0;
                     g_state = STATE_ESPNOW;
-                } else {
+                } else if (g_target_cursor == 1) {
                     // CAPTURE — send a signed challenge nonce to the target
                     ensure_unicast_peer(g_peers[g_target_peer_idx].mac);
                     BeaconMsg chal = {};
@@ -1441,6 +1481,13 @@ static void handle_buttons(uint8_t pressed) {
                     Serial.printf("[ctf] sent capture challenge -> %s\n", g_peers[g_target_peer_idx].name);
                     g_espnow_tab = 4;  // watch SCORE tab for result
                     g_state = STATE_ESPNOW;
+                } else {
+                    // BLOCK / UNBLOCK
+                    g_peers[g_target_peer_idx].blocked = !g_peers[g_target_peer_idx].blocked;
+                    Serial.printf("[espnow] %s %s\n",
+                        g_peers[g_target_peer_idx].blocked ? "blocked" : "unblocked",
+                        g_peers[g_target_peer_idx].name);
+                    g_state = STATE_ESPNOW; g_espnow_tab = 1;
                 }
                 g_needs_redraw = true;
             }
