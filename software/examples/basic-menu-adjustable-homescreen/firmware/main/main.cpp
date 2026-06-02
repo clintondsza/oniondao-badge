@@ -690,7 +690,8 @@ static void add_ping_peer(const uint8_t* mac) {
         Serial.printf("[espnow] add_ping_peer failed: %d (table full?)\n", err);
 }
 
-static void on_recv(const uint8_t* mac, const uint8_t* data, int len) {
+static void on_recv(const esp_now_recv_info_t* info, const uint8_t* data, int len) {
+    const uint8_t* mac = info->src_addr;  // arduino-esp32 3.x: sender MAC moved into recv_info
     if ((size_t)len == sizeof(BeaconMsg)) {
         BeaconMsg msg;
         memcpy(&msg, data, sizeof(BeaconMsg));
