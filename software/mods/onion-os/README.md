@@ -10,6 +10,7 @@ other badge firmware in this repo.
 
 - Persistent per-badge hardware ID stored in NVS.
 - Hardcoded WiFi for `CIC Guest` / `1nnovation`.
+- Hardcoded Onion API server URL: `https://oniondao.dev`.
 - HTTP badge handshake:
   - `POST /api/badge/handshake`
 - MQTT badge bridge:
@@ -67,7 +68,8 @@ popup, stores approved code in SPIFFS, runs it, and responds on
 `oniondao/badge/{onionId}/lua/response` plus the HTTP fallback
 `POST /api/badge/lua-response`.
 
-Installed scripts are stored as `/scripts_*.lua`. The badge's home menu opens a
+Installed scripts are stored as `/scripts_*.lua`. Downloaded image assets are
+stored as `/images_*.pbm` or `/images_*.bmp`. The badge's home menu opens a
 script explorer that lists both manifest-downloaded scripts and server-pushed
 scripts from SPIFFS; selecting a script runs it locally.
 
@@ -82,6 +84,18 @@ Scripts receive a small global `onion` table:
 - `onion.hardware_id()` returns the badge hardware ID.
 - `onion.onion_id()` returns the current Onion ID, or `0` before handshake.
 - `onion.wallet()` returns the configured Solana public key, if any.
+- `onion.clear_display()` clears the e-paper display and leaves Lua in control
+  of the screen until the next button press.
+- `onion.display_bitmap(name, x, y, clear)` draws a downloaded PBM or BMP image
+  asset. Pass `-1` for `x` or `y` to center that axis. `clear` defaults to true.
+- `onion.gpio_read(pin, mode)` reads an expansion GPIO and returns `0` or `1`.
+- `onion.gpio_poll(pin, target, timeout_ms, interval_ms, mode)` polls an
+  expansion GPIO until it equals `target`, returning `matched, value,
+  elapsed_ms`.
+
+GPIO `mode` is optional and may be `"input"`, `"floating"`, `"pullup"`, `"up"`,
+`"pulldown"`, or `"down"`. Lua scripts can read the side-port GPIOs only:
+`48, 47, 19, 42, 41, 40, 38, 39, 16, 15, 7, 6, 5, 4`.
 
 Expected manifest shape:
 
@@ -93,8 +107,30 @@ Expected manifest shape:
       "url": "https://example.com/hello.lua",
       "autorun": false
     }
+  ],
+  "images": [
+    {
+      "name": "poster.pbm",
+      "url": "https://example.com/poster.pbm"
+    },
+    {
+      "name": "sponsor.bmp",
+      "url": "https://example.com/sponsor.bmp"
+    }
   ]
 }
+```
+
+Image assets should be sized for the 264x176 black-and-white e-paper panel.
+PBM files may be binary `P4` or ascii `P1`; BMP files must be uncompressed
+1/4/8/24/32-bit BMPs. Images larger than 192 KB or larger than the panel are
+rejected.
+
+Example Lua image script:
+
+```lua
+local ok, err = onion.display_bitmap("poster.pbm", -1, -1)
+if not ok then onion.log(err) end
 ```
 
 The inspected server currently does not expose a script manifest route, so set
@@ -111,7 +147,7 @@ cp main/onion_config.h.example main/onion_config.h
 Runtime serial commands are persisted in NVS:
 
 ```text
-server <base_url> [badge_api_key]
+api-key <badge_api_key>
 mqtt <uri> [username] [password] [prefix]
 scripts-url <manifest_url>
 wallet
@@ -126,7 +162,7 @@ help
 Examples:
 
 ```text
-server https://oniondao.dev badge-api-secret
+api-key badge-api-secret
 mqtt mqtts://broker.example.com badge badge-password oniondao
 wallet
 handshake

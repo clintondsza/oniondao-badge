@@ -49,6 +49,7 @@ extern "C" {
 
 #define ONION_HARDCODED_WIFI_SSID "CIC Guest"
 #define ONION_HARDCODED_WIFI_PASSWORD "1nnovation"
+#define ONION_HARDCODED_SERVER_BASE_URL "https://oniondao.dev"
 
 #define TCA9534_ADDR   0x20
 #define TCA9534_INPUT  0x00
@@ -68,6 +69,7 @@ extern "C" {
 #define UI_REFRESH_INTERVAL_MS 1000
 #define BOOT_SPLASH_MS 3000
 #define MAX_SCRIPT_BYTES (64 * 1024)
+#define MAX_IMAGE_BYTES (192 * 1024)
 #define ATECC_HMAC_SLOT 10
 #define ATECC_I2C_ADDRESS_8BIT 0xC0
 #define ATECC_SERIAL_LEN 9
@@ -77,6 +79,7 @@ extern "C" {
 #define SOLANA_SEED_LEN 32
 #define SOLANA_KEY_NONCE_LEN crypto_aead_xchacha20poly1305_ietf_NPUBBYTES
 #define SOLANA_KEY_MAC_LEN crypto_aead_xchacha20poly1305_ietf_ABYTES
+#define LUA_GPIO_POLL_MAX_MS 30000
 
 GxEPD2_BW<GxEPD2_270_GDEY027T91, GxEPD2_270_GDEY027T91::HEIGHT> display(
     GxEPD2_270_GDEY027T91(PIN_EPD_CS, PIN_EPD_DC, PIN_EPD_RST, PIN_EPD_BUSY)
@@ -166,8 +169,11 @@ static String g_log = "Booting";
 static int g_homeSelection = 0;
 static int g_scriptSelection = 0;
 static std::vector<String> g_scripts;
+static bool g_luaDisplayActive = false;
 static bool g_ateccReady = false;
 static uint8_t g_ateccSerial[ATECC_SERIAL_LEN] = {};
+
+static const int kLuaReadableGpios[] = {48, 47, 19, 42, 41, 40, 38, 39, 16, 15, 7, 6, 5, 4};
 
 static String prefString(const char* key, const char* fallback) {
     String value = g_prefs.getString(key, "");
@@ -181,7 +187,7 @@ static void saveConfigValue(const char* key, const String& value) {
 static void setLog(const String& message) {
     g_log = message;
     Serial.printf("[onion-os] %s\n", message.c_str());
-    g_needsRedraw = true;
+    if (!g_luaDisplayActive) g_needsRedraw = true;
 }
 
 static String generateHardwareId() {
@@ -198,7 +204,7 @@ static void loadConfig() {
     g_prefs.begin("onion-os", false);
     g_config.wifiSsid = ONION_HARDCODED_WIFI_SSID;
     g_config.wifiPassword = ONION_HARDCODED_WIFI_PASSWORD;
-    g_config.serverBaseUrl = prefString("server", ONION_DEFAULT_SERVER_BASE_URL);
+    g_config.serverBaseUrl = ONION_HARDCODED_SERVER_BASE_URL;
     g_config.badgeApiKey = prefString("api_key", ONION_DEFAULT_BADGE_API_KEY);
     g_config.mqttUri = prefString("mqtt_uri", ONION_DEFAULT_MQTT_URI);
     g_config.mqttUsername = prefString("mqtt_user", ONION_DEFAULT_MQTT_USERNAME);
@@ -482,7 +488,9 @@ static String topic(const String& suffix) {
 
 static void initPeripherals() {
     pinMode(PIN_PWR, OUTPUT);
-    digitalWrite(PIN_PWR, HIGH);
+    // GPIO18 drives the battery power-hold latch. Keep it released so the
+    // physical ON/OFF switch can actually cut VSYS and the display power.
+    digitalWrite(PIN_PWR, LOW);
 
     pinMode(PIN_SE_EN, OUTPUT);
     digitalWrite(PIN_SE_EN, HIGH);
@@ -532,6 +540,29 @@ static String storedScriptDisplayName(const String& path) {
     if (name.startsWith("/")) name.remove(0, 1);
     if (name.startsWith("scripts_")) name.remove(0, 8);
     return name;
+}
+
+static bool validAssetFileName(const String& name, const char* requiredSuffix = nullptr) {
+    if (!name.length() || name.length() > 96 ||
+        name.indexOf('/') >= 0 || name.indexOf('\\') >= 0) return false;
+    if (requiredSuffix && !name.endsWith(requiredSuffix)) return false;
+    for (size_t i = 0; i < name.length(); ++i) {
+        char ch = name[i];
+        bool ok = (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
+            (ch >= '0' && ch <= '9') || ch == '.' || ch == '-' || ch == '_';
+        if (!ok) return false;
+    }
+    return true;
+}
+
+static bool validImageFileName(const String& name) {
+    if (!validAssetFileName(name)) return false;
+    return name.endsWith(".pbm") || name.endsWith(".bmp");
+}
+
+static String imagePathForName(const String& name) {
+    if (!validImageFileName(name)) return String();
+    return "/images_" + name;
 }
 
 static void refreshScriptList() {
@@ -841,6 +872,7 @@ static void subscribeBadgeTopics() {
 }
 
 static void handleLinkRequest(cJSON* root) {
+    g_luaDisplayActive = false;
     g_linkPrompt.requestId = jsonString(root, "requestId");
     g_linkPrompt.username = jsonString(root, "username");
     g_linkPrompt.active = true;
@@ -849,6 +881,7 @@ static void handleLinkRequest(cJSON* root) {
 }
 
 static void handleTransactionRequest(cJSON* root) {
+    g_luaDisplayActive = false;
     g_txPrompt.operationId = jsonString(root, "operationId");
     g_txPrompt.requestId = jsonString(root, "requestId");
     g_txPrompt.type = jsonString(root, "type");
@@ -860,6 +893,7 @@ static void handleTransactionRequest(cJSON* root) {
 }
 
 static void handleLuaRequest(cJSON* root) {
+    g_luaDisplayActive = false;
     g_luaPrompt.requestId = jsonString(root, "requestId");
     g_luaPrompt.scriptId = jsonString(root, "scriptId");
     g_luaPrompt.title = jsonString(root, "title");
@@ -1182,7 +1216,7 @@ static bool refreshPublicProfile() {
     return true;
 }
 
-static bool downloadFile(const String& url, const String& path) {
+static bool downloadFile(const String& url, const String& path, size_t maxBytes, const String& label) {
     if (!ensureWifi()) return false;
     esp_http_client_config_t cfg = {};
     cfg.url = url.c_str();
@@ -1198,7 +1232,7 @@ static bool downloadFile(const String& url, const String& path) {
     esp_err_t err = esp_http_client_open(client, 0);
     if (err != ESP_OK) {
         esp_http_client_cleanup(client);
-        setLog("Script open failed");
+        setLog(label + " open failed");
         return false;
     }
     int contentLength = esp_http_client_fetch_headers(client);
@@ -1206,13 +1240,13 @@ static bool downloadFile(const String& url, const String& path) {
     if (code < 200 || code >= 300) {
         esp_http_client_close(client);
         esp_http_client_cleanup(client);
-        setLog("Script GET failed " + String(code));
+        setLog(label + " GET failed " + String(code));
         return false;
     }
-    if (contentLength > MAX_SCRIPT_BYTES) {
+    if (contentLength > 0 && (size_t)contentLength > maxBytes) {
         esp_http_client_close(client);
         esp_http_client_cleanup(client);
-        setLog("Script too large");
+        setLog(label + " too large");
         return false;
     }
 
@@ -1220,12 +1254,12 @@ static bool downloadFile(const String& url, const String& path) {
     if (!file) {
         esp_http_client_close(client);
         esp_http_client_cleanup(client);
-        setLog("Script open failed");
+        setLog(label + " open failed");
         return false;
     }
 
     uint8_t buf[256];
-    int written = 0;
+    size_t written = 0;
     while (true) {
         int read = esp_http_client_read(client, reinterpret_cast<char*>(buf), sizeof(buf));
         if (read < 0) {
@@ -1233,18 +1267,18 @@ static bool downloadFile(const String& url, const String& path) {
             esp_http_client_close(client);
             esp_http_client_cleanup(client);
             SPIFFS.remove(path);
-            setLog("Script read failed");
+            setLog(label + " read failed");
             return false;
         }
         if (read == 0) break;
         file.write(buf, (size_t)read);
         written += read;
-        if (written > MAX_SCRIPT_BYTES) {
+        if (written > maxBytes) {
             file.close();
             esp_http_client_close(client);
             esp_http_client_cleanup(client);
             SPIFFS.remove(path);
-            setLog("Script too large");
+            setLog(label + " too large");
             return false;
         }
     }
@@ -1252,6 +1286,278 @@ static bool downloadFile(const String& url, const String& path) {
     file.close();
     esp_http_client_close(client);
     esp_http_client_cleanup(client);
+    return true;
+}
+
+static bool downloadScriptFile(const String& url, const String& path) {
+    return downloadFile(url, path, MAX_SCRIPT_BYTES, "Script");
+}
+
+static bool downloadImageFile(const String& url, const String& path) {
+    return downloadFile(url, path, MAX_IMAGE_BYTES, "Image");
+}
+
+struct LoadedBitmap {
+    int width = 0;
+    int height = 0;
+    std::vector<uint8_t> bits;
+};
+
+static void setBitmapPixel(LoadedBitmap& bitmap, int x, int y, bool black) {
+    if (!black || x < 0 || y < 0 || x >= bitmap.width || y >= bitmap.height) return;
+    size_t rowBytes = (bitmap.width + 7) / 8;
+    bitmap.bits[y * rowBytes + x / 8] |= 0x80 >> (x & 7);
+}
+
+static uint16_t readLe16(const std::vector<uint8_t>& data, size_t offset) {
+    if (offset + 2 > data.size()) return 0;
+    return (uint16_t)data[offset] | ((uint16_t)data[offset + 1] << 8);
+}
+
+static uint32_t readLe32(const std::vector<uint8_t>& data, size_t offset) {
+    if (offset + 4 > data.size()) return 0;
+    return (uint32_t)data[offset] | ((uint32_t)data[offset + 1] << 8) |
+        ((uint32_t)data[offset + 2] << 16) | ((uint32_t)data[offset + 3] << 24);
+}
+
+static int32_t readLeS32(const std::vector<uint8_t>& data, size_t offset) {
+    return (int32_t)readLe32(data, offset);
+}
+
+static bool isBlackRgb(uint8_t r, uint8_t g, uint8_t b) {
+    return ((uint16_t)r * 30 + (uint16_t)g * 59 + (uint16_t)b * 11) < 12800;
+}
+
+static bool loadFileBytes(const String& path, std::vector<uint8_t>& bytes, size_t maxBytes, String& error) {
+    File file = SPIFFS.open(path, FILE_READ);
+    if (!file) {
+        error = "Image missing";
+        return false;
+    }
+    size_t size = file.size();
+    if (!size || size > maxBytes) {
+        file.close();
+        error = "Image too large";
+        return false;
+    }
+    bytes.assign(size, 0);
+    size_t read = file.read(bytes.data(), bytes.size());
+    file.close();
+    if (read != size) {
+        error = "Image read failed";
+        return false;
+    }
+    return true;
+}
+
+static bool readPbmToken(const std::vector<uint8_t>& data, size_t& offset, String& token) {
+    token = "";
+    while (offset < data.size()) {
+        char ch = (char)data[offset];
+        if (ch == '#') {
+            while (offset < data.size() && data[offset] != '\n') offset++;
+        } else if (ch == ' ' || ch == '\t' || ch == '\r' || ch == '\n') {
+            offset++;
+        } else {
+            break;
+        }
+    }
+    while (offset < data.size()) {
+        char ch = (char)data[offset];
+        if (ch == ' ' || ch == '\t' || ch == '\r' || ch == '\n' || ch == '#') break;
+        token += ch;
+        offset++;
+    }
+    return token.length() > 0;
+}
+
+static bool loadPbmBitmap(const std::vector<uint8_t>& data, LoadedBitmap& bitmap, String& error) {
+    size_t offset = 0;
+    String magic;
+    String widthToken;
+    String heightToken;
+    if (!readPbmToken(data, offset, magic) || !readPbmToken(data, offset, widthToken) ||
+        !readPbmToken(data, offset, heightToken)) {
+        error = "Bad PBM header";
+        return false;
+    }
+
+    bitmap.width = widthToken.toInt();
+    bitmap.height = heightToken.toInt();
+    if (bitmap.width <= 0 || bitmap.height <= 0 ||
+        bitmap.width > display.width() || bitmap.height > display.height()) {
+        error = "PBM size unsupported";
+        return false;
+    }
+
+    size_t rowBytes = (bitmap.width + 7) / 8;
+    bitmap.bits.assign(rowBytes * bitmap.height, 0);
+
+    if (magic == "P4") {
+        if (offset < data.size() &&
+            (data[offset] == ' ' || data[offset] == '\t' || data[offset] == '\r' || data[offset] == '\n')) offset++;
+        size_t needed = rowBytes * bitmap.height;
+        if (offset + needed > data.size()) {
+            error = "PBM data short";
+            return false;
+        }
+        memcpy(bitmap.bits.data(), data.data() + offset, needed);
+        return true;
+    }
+
+    if (magic == "P1") {
+        String pixel;
+        for (int y = 0; y < bitmap.height; ++y) {
+            for (int x = 0; x < bitmap.width; ++x) {
+                if (!readPbmToken(data, offset, pixel)) {
+                    error = "PBM data short";
+                    return false;
+                }
+                setBitmapPixel(bitmap, x, y, pixel == "1");
+            }
+        }
+        return true;
+    }
+
+    error = "Unsupported PBM";
+    return false;
+}
+
+static bool loadBmpBitmap(const std::vector<uint8_t>& data, LoadedBitmap& bitmap, String& error) {
+    if (data.size() < 54 || data[0] != 'B' || data[1] != 'M') {
+        error = "Bad BMP header";
+        return false;
+    }
+
+    uint32_t pixelOffset = readLe32(data, 10);
+    uint32_t dibSize = readLe32(data, 14);
+    int32_t width = readLeS32(data, 18);
+    int32_t rawHeight = readLeS32(data, 22);
+    uint16_t planes = readLe16(data, 26);
+    uint16_t bpp = readLe16(data, 28);
+    uint32_t compression = readLe32(data, 30);
+    uint32_t colorsUsed = readLe32(data, 46);
+    if (dibSize < 40 || width <= 0 || rawHeight == 0 || planes != 1 || compression != 0 ||
+        (bpp != 1 && bpp != 4 && bpp != 8 && bpp != 24 && bpp != 32)) {
+        error = "Unsupported BMP";
+        return false;
+    }
+
+    int height = rawHeight < 0 ? -rawHeight : rawHeight;
+    bool topDown = rawHeight < 0;
+    if (width > display.width() || height > display.height()) {
+        error = "BMP size unsupported";
+        return false;
+    }
+
+    bitmap.width = width;
+    bitmap.height = height;
+    size_t outRowBytes = (bitmap.width + 7) / 8;
+    bitmap.bits.assign(outRowBytes * bitmap.height, 0);
+
+    uint32_t paletteEntries = bpp <= 8 ? (colorsUsed ? colorsUsed : (1UL << bpp)) : 0;
+    size_t paletteOffset = 14 + dibSize;
+    if (paletteEntries && paletteOffset + paletteEntries * 4 > data.size()) {
+        error = "BMP palette bad";
+        return false;
+    }
+
+    uint32_t rowBytes = ((uint32_t)width * bpp + 31) / 32 * 4;
+    if (pixelOffset + rowBytes * height > data.size()) {
+        error = "BMP data short";
+        return false;
+    }
+
+    for (int y = 0; y < height; ++y) {
+        int srcY = topDown ? y : (height - 1 - y);
+        size_t rowOffset = pixelOffset + rowBytes * srcY;
+        for (int x = 0; x < width; ++x) {
+            uint8_t r = 255;
+            uint8_t g = 255;
+            uint8_t b = 255;
+            if (bpp == 24 || bpp == 32) {
+                size_t pixel = rowOffset + x * (bpp / 8);
+                b = data[pixel];
+                g = data[pixel + 1];
+                r = data[pixel + 2];
+            } else {
+                uint8_t index = 0;
+                if (bpp == 8) {
+                    index = data[rowOffset + x];
+                } else if (bpp == 4) {
+                    uint8_t packed = data[rowOffset + x / 2];
+                    index = (x & 1) ? (packed & 0x0F) : (packed >> 4);
+                } else {
+                    uint8_t packed = data[rowOffset + x / 8];
+                    index = (packed >> (7 - (x & 7))) & 0x01;
+                }
+                if (index >= paletteEntries) {
+                    error = "BMP palette index";
+                    return false;
+                }
+                size_t color = paletteOffset + index * 4;
+                b = data[color];
+                g = data[color + 1];
+                r = data[color + 2];
+            }
+            setBitmapPixel(bitmap, x, y, isBlackRgb(r, g, b));
+        }
+    }
+    return true;
+}
+
+static bool loadStoredBitmap(const String& name, LoadedBitmap& bitmap, String& error) {
+    String path = imagePathForName(name);
+    if (!path.length()) {
+        error = "Bad image name";
+        return false;
+    }
+
+    std::vector<uint8_t> bytes;
+    if (!loadFileBytes(path, bytes, MAX_IMAGE_BYTES, error)) return false;
+    if (name.endsWith(".pbm")) return loadPbmBitmap(bytes, bitmap, error);
+    if (name.endsWith(".bmp")) return loadBmpBitmap(bytes, bitmap, error);
+    error = "Unsupported image";
+    return false;
+}
+
+static void renderBitmap(const LoadedBitmap& bitmap, int x, int y, bool clearScreen) {
+    display.setFullWindow();
+    display.firstPage();
+    do {
+        if (clearScreen) display.fillScreen(GxEPD_WHITE);
+        display.drawBitmap(x, y, bitmap.bits.data(), bitmap.width, bitmap.height, GxEPD_BLACK);
+    } while (display.nextPage());
+    g_luaDisplayActive = true;
+    g_needsRedraw = false;
+}
+
+static bool luaCanReadGpio(int pin) {
+    for (int allowed : kLuaReadableGpios) {
+        if (allowed == pin) return true;
+    }
+    return false;
+}
+
+static bool luaConfigureInputGpio(lua_State* L, int pin, int modeArg) {
+    if (!luaCanReadGpio(pin)) {
+        lua_pushboolean(L, false);
+        lua_pushfstring(L, "GPIO %d is not readable by Lua", pin);
+        return false;
+    }
+
+    const char* mode = luaL_optstring(L, modeArg, "input");
+    if (strcmp(mode, "input") == 0 || strcmp(mode, "floating") == 0) {
+        pinMode(pin, INPUT);
+    } else if (strcmp(mode, "pullup") == 0 || strcmp(mode, "up") == 0) {
+        pinMode(pin, INPUT_PULLUP);
+    } else if (strcmp(mode, "pulldown") == 0 || strcmp(mode, "down") == 0) {
+        pinMode(pin, INPUT_PULLDOWN);
+    } else {
+        lua_pushboolean(L, false);
+        lua_pushfstring(L, "Bad GPIO mode: %s", mode);
+        return false;
+    }
     return true;
 }
 
@@ -1276,6 +1582,76 @@ static int luaOnionWallet(lua_State* L) {
     return 1;
 }
 
+static int luaOnionClearDisplay(lua_State*) {
+    display.setFullWindow();
+    display.firstPage();
+    do {
+        display.fillScreen(GxEPD_WHITE);
+    } while (display.nextPage());
+    g_luaDisplayActive = true;
+    g_needsRedraw = false;
+    return 0;
+}
+
+static int luaOnionDisplayBitmap(lua_State* L) {
+    String name = luaL_checkstring(L, 1);
+    int x = (int)luaL_optinteger(L, 2, 0);
+    int y = (int)luaL_optinteger(L, 3, 0);
+    bool clearScreen = lua_gettop(L) < 4 || lua_toboolean(L, 4);
+
+    LoadedBitmap bitmap;
+    String error;
+    if (!loadStoredBitmap(name, bitmap, error)) {
+        lua_pushboolean(L, false);
+        lua_pushstring(L, error.c_str());
+        setLog(error);
+        return 2;
+    }
+
+    if (x < 0) x = (display.width() - bitmap.width) / 2;
+    if (y < 0) y = (display.height() - bitmap.height) / 2;
+    renderBitmap(bitmap, x, y, clearScreen);
+    lua_pushboolean(L, true);
+    return 1;
+}
+
+static int luaOnionGpioRead(lua_State* L) {
+    int pin = (int)luaL_checkinteger(L, 1);
+    if (!luaConfigureInputGpio(L, pin, 2)) return 2;
+
+    lua_pushinteger(L, digitalRead(pin) == HIGH ? 1 : 0);
+    return 1;
+}
+
+static int luaOnionGpioPoll(lua_State* L) {
+    int pin = (int)luaL_checkinteger(L, 1);
+    int target = (int)luaL_checkinteger(L, 2) ? 1 : 0;
+    uint32_t timeoutMs = (uint32_t)luaL_optinteger(L, 3, 1000);
+    uint32_t intervalMs = (uint32_t)luaL_optinteger(L, 4, 25);
+    if (timeoutMs > LUA_GPIO_POLL_MAX_MS) timeoutMs = LUA_GPIO_POLL_MAX_MS;
+    if (intervalMs < 1) intervalMs = 1;
+    if (intervalMs > 1000) intervalMs = 1000;
+    if (!luaConfigureInputGpio(L, pin, 5)) return 2;
+
+    uint32_t start = millis();
+    int value = digitalRead(pin) == HIGH ? 1 : 0;
+    while ((uint32_t)(millis() - start) <= timeoutMs) {
+        value = digitalRead(pin) == HIGH ? 1 : 0;
+        if (value == target) {
+            lua_pushboolean(L, true);
+            lua_pushinteger(L, value);
+            lua_pushinteger(L, (lua_Integer)(millis() - start));
+            return 3;
+        }
+        delay(intervalMs);
+    }
+
+    lua_pushboolean(L, false);
+    lua_pushinteger(L, value);
+    lua_pushinteger(L, (lua_Integer)(millis() - start));
+    return 3;
+}
+
 static void registerOnionLua(lua_State* L) {
     lua_newtable(L);
     lua_pushcfunction(L, luaOnionLog);
@@ -1286,6 +1662,14 @@ static void registerOnionLua(lua_State* L) {
     lua_setfield(L, -2, "onion_id");
     lua_pushcfunction(L, luaOnionWallet);
     lua_setfield(L, -2, "wallet");
+    lua_pushcfunction(L, luaOnionClearDisplay);
+    lua_setfield(L, -2, "clear_display");
+    lua_pushcfunction(L, luaOnionDisplayBitmap);
+    lua_setfield(L, -2, "display_bitmap");
+    lua_pushcfunction(L, luaOnionGpioRead);
+    lua_setfield(L, -2, "gpio_read");
+    lua_pushcfunction(L, luaOnionGpioPoll);
+    lua_setfield(L, -2, "gpio_poll");
     lua_setglobal(L, "onion");
 }
 
@@ -1308,7 +1692,11 @@ static bool runLuaSource(const String& source, const String& name) {
     }
 
     lua_close(L);
-    setLog("Lua ran " + name);
+    if (g_luaDisplayActive) {
+        Serial.printf("[onion-os] Lua ran %s\n", name.c_str());
+    } else {
+        setLog("Lua ran " + name);
+    }
     return true;
 }
 
@@ -1339,15 +1727,7 @@ static void runScriptByName(const String& name) {
 }
 
 static bool validScriptFileName(const String& name) {
-    if (!name.length() || name.length() > 96 || !name.endsWith(".lua") ||
-        name.indexOf('/') >= 0 || name.indexOf('\\') >= 0) return false;
-    for (size_t i = 0; i < name.length(); ++i) {
-        char ch = name[i];
-        bool ok = (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
-            (ch >= '0' && ch <= '9') || ch == '.' || ch == '-' || ch == '_';
-        if (!ok) return false;
-    }
-    return true;
+    return validAssetFileName(name, ".lua");
 }
 
 static String pushedScriptFileName() {
@@ -1453,33 +1833,46 @@ static void syncScripts() {
 
     cJSON* root = cJSON_Parse(payload.c_str());
     cJSON* scripts = root ? cJSON_GetObjectItemCaseSensitive(root, "scripts") : nullptr;
-    if (!cJSON_IsArray(scripts)) {
+    cJSON* images = root ? cJSON_GetObjectItemCaseSensitive(root, "images") : nullptr;
+    if (!cJSON_IsArray(scripts) && !cJSON_IsArray(images)) {
         if (root) cJSON_Delete(root);
         setLog("Bad script manifest");
         return;
     }
 
     int count = 0;
-    cJSON* script = nullptr;
-    cJSON_ArrayForEach(script, scripts) {
-        String name = jsonString(script, "name");
-        String url = jsonString(script, "url");
-        bool autorun = jsonBool(script, "autorun", false);
-        if (!name.length() || !url.length() || name.indexOf('/') >= 0) continue;
-        String path = "/scripts_" + name;
-        if (downloadFile(url, path)) {
-            count++;
-            if (autorun) runStoredScript(path);
+    if (cJSON_IsArray(scripts)) {
+        cJSON* script = nullptr;
+        cJSON_ArrayForEach(script, scripts) {
+            String name = jsonString(script, "name");
+            String url = jsonString(script, "url");
+            bool autorun = jsonBool(script, "autorun", false);
+            if (!validScriptFileName(name) || !url.length()) continue;
+            String path = "/scripts_" + name;
+            if (downloadScriptFile(url, path)) {
+                count++;
+                if (autorun) runStoredScript(path);
+            }
+        }
+    }
+    int imageCount = 0;
+    if (cJSON_IsArray(images)) {
+        cJSON* image = nullptr;
+        cJSON_ArrayForEach(image, images) {
+            String name = jsonString(image, "name");
+            String url = jsonString(image, "url");
+            if (!validImageFileName(name) || !url.length()) continue;
+            if (downloadImageFile(url, imagePathForName(name))) imageCount++;
         }
     }
     cJSON_Delete(root);
-    setLog("Scripts synced: " + String(count));
+    setLog("Synced S:" + String(count) + " I:" + String(imageCount));
 }
 
 static void printHelp() {
     Serial.println();
     Serial.println("Onion OS serial commands:");
-    Serial.println("  server <base_url> [badge_api_key]");
+    Serial.println("  api-key <badge_api_key>");
     Serial.println("  mqtt <uri> [username] [password] [prefix]");
     Serial.println("  scripts-url <manifest_url>");
     Serial.println("  wallet");
@@ -1523,12 +1916,19 @@ static void handleSerial() {
 
         if (args[0] == "wifi") {
             setLog("WiFi is hardcoded");
-        } else if (args[0] == "server" && args.size() >= 2) {
-            g_config.serverBaseUrl = args[1];
-            g_config.badgeApiKey = args.size() >= 3 ? args[2] : "";
-            saveConfigValue("server", g_config.serverBaseUrl);
+        } else if (args[0] == "server") {
+            g_config.serverBaseUrl = ONION_HARDCODED_SERVER_BASE_URL;
+            if (args.size() >= 3) {
+                g_config.badgeApiKey = args[2];
+                saveConfigValue("api_key", g_config.badgeApiKey);
+                setLog("API key saved; URL hardcoded");
+            } else {
+                setLog("Server URL is hardcoded");
+            }
+        } else if (args[0] == "api-key" && args.size() >= 2) {
+            g_config.badgeApiKey = args[1];
             saveConfigValue("api_key", g_config.badgeApiKey);
-            setLog("Server config saved");
+            setLog("API key saved");
         } else if (args[0] == "mqtt" && args.size() >= 2) {
             g_config.mqttUri = args[1];
             g_config.mqttUsername = args.size() >= 3 ? args[2] : "";
@@ -1601,6 +2001,13 @@ static void handleButtons() {
     g_lastButtons = buttons;
     if (!pressed) return;
 
+    if (g_luaDisplayActive) {
+        g_luaDisplayActive = false;
+        g_screen = SCREEN_STATUS;
+        g_needsRedraw = true;
+        return;
+    }
+
     if (g_screen == SCREEN_LINK_PROMPT) {
         if (pressed & BTN_SELECT) sendLinkResponse(true);
         if (pressed & BTN_CANCEL) sendLinkResponse(false);
@@ -1647,7 +2054,7 @@ static void handleButtons() {
             g_screen = SCREEN_SCRIPT_EXPLORER;
         }
     }
-    g_needsRedraw = true;
+    if (!g_luaDisplayActive) g_needsRedraw = true;
 }
 
 void setup() {
@@ -1690,7 +2097,7 @@ void loop() {
 
     if (millis() - g_lastUiRefresh > UI_REFRESH_INTERVAL_MS) {
         g_lastUiRefresh = millis();
-        if (g_screen == SCREEN_STATUS) g_needsRedraw = true;
+        if (g_screen == SCREEN_STATUS && !g_luaDisplayActive) g_needsRedraw = true;
     }
 
     redraw();

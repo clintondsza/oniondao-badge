@@ -1,10 +1,11 @@
 #pragma once
 
-// Copy to onion_config.h for baked-in server/MQTT defaults. WiFi is intentionally
-// hardcoded in firmware to CIC Guest / 1nnovation.
+// Copy to onion_config.h for baked-in MQTT defaults. WiFi and the Onion API
+// server are intentionally hardcoded in firmware.
 #define ONION_DEFAULT_WIFI_SSID "CIC Guest"
 #define ONION_DEFAULT_WIFI_PASSWORD "1nnovation"
 
+// The firmware ignores this for runtime API calls and uses https://oniondao.dev.
 #define ONION_DEFAULT_SERVER_BASE_URL "https://oniondao.dev"
 #define ONION_DEFAULT_BADGE_API_KEY ""
 
