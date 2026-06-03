@@ -1,0 +1,18 @@
+#pragma once
+
+// Copy to onion_config.h for baked-in server/MQTT defaults. WiFi is intentionally
+// hardcoded in firmware to CIC Guest / 1nnovation.
+#define ONION_DEFAULT_WIFI_SSID "CIC Guest"
+#define ONION_DEFAULT_WIFI_PASSWORD "1nnovation"
+
+#define ONION_DEFAULT_SERVER_BASE_URL "https://oniondao.dev"
+#define ONION_DEFAULT_BADGE_API_KEY ""
+
+#define ONION_DEFAULT_MQTT_URI ""
+#define ONION_DEFAULT_MQTT_USERNAME ""
+#define ONION_DEFAULT_MQTT_PASSWORD ""
+#define ONION_DEFAULT_MQTT_TOPIC_PREFIX "oniondao"
+
+// Optional JSON manifest:
+// { "scripts": [{ "name": "hello.lua", "url": "https://...", "autorun": false }] }
+#define ONION_DEFAULT_SCRIPT_MANIFEST_URL ""
