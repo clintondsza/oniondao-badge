@@ -76,9 +76,11 @@ script explorer that lists both manifest-downloaded scripts and server-pushed
 scripts from SPIFFS; selecting a script runs it locally.
 
 The handshake routes currently only return `onionId` and `status`. After a badge
-is linked, the firmware caches the `username` from the server's link request and
-uses `GET /api/public/profile/{username}` as a best-effort balance refresh for
-`currentOnionPoints` or `currentOnionTokens`.
+is linked, the firmware refreshes its owner profile by Onion ID with
+`GET /api/badge/profile/{onionId}` and falls back to the cached `username` with
+`GET /api/public/profile/{username}` for `currentOnionPoints` or
+`currentOnionTokens`. If the server has `BADGE_API_KEY` configured, provision the
+same key on the badge with the serial command `api-key <badge_api_key>`.
 
 Scripts receive a small global `onion` table:
 

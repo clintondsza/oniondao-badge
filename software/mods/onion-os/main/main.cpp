@@ -1265,15 +1265,20 @@ static String urlEncode(const String& value) {
 }
 
 static bool refreshPublicProfile() {
-    if (!g_identity.username.length()) {
-        setLog("No linked username");
+    if (!g_identity.onionId && !g_identity.username.length()) {
+        setLog("No profile identity");
         return false;
     }
 
     String base = g_config.serverBaseUrl;
     if (base.endsWith("/")) base.remove(base.length() - 1);
     String response;
-    int code = httpGetString(base + "/api/public/profile/" + urlEncode(g_identity.username), &response);
+    int code = g_identity.onionId
+        ? httpGetString(base + "/api/badge/profile/" + String((unsigned long long)g_identity.onionId), &response)
+        : -1;
+    if ((code < 200 || code >= 300) && g_identity.username.length()) {
+        code = httpGetString(base + "/api/public/profile/" + urlEncode(g_identity.username), &response);
+    }
     if (code < 200 || code >= 300) {
         setLog("Profile GET failed " + String(code));
         return false;
