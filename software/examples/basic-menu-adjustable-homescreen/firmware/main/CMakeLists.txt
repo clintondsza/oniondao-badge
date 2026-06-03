@@ -2,6 +2,7 @@ idf_component_register(
     SRCS "main.cpp"
     INCLUDE_DIRS "."
     REQUIRES espressif__arduino-esp32 GxEPD2 SparkFun_ATECCX08a_Arduino_Library
+             espressif__libsodium espressif__qrcode nvs_flash
 )
 
 # The Arduino/PlatformIO build did not treat warnings as errors; ESP-IDF adds a

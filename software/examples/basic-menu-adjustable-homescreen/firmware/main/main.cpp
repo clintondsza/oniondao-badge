@@ -17,6 +17,11 @@
 
 #include <SparkFun_ATECCX08a_Arduino_Library.h>
 
+#include <sodium.h>
+#include <nvs_flash.h>
+#include <nvs.h>
+#include <qrcode.h>
+
 #include "badge_pins.h"
 
 // ── TCA9534 (buttons) ─────────────────────────────────────────────────────────
@@ -130,6 +135,11 @@ static bool      g_atecc_available = false;  // chip found at 0x60
 static bool      g_atecc_ok        = false;  // provisioned + pubkey cached
 static uint8_t   g_atecc_pubkey[PUBLIC_KEY_SIZE] = {};
 
+// ── Solana wallet ─────────────────────────────────────────────────────────────
+static uint8_t g_wallet_pubkey[32]  = {};
+static char    g_wallet_address[48] = {};  // base58-encoded Ed25519 pubkey (~44 chars)
+static bool    g_wallet_ready       = false;
+
 // Queued ECDSA verification (done in main loop, not in recv callback)
 static bool      g_needs_verify       = false;
 static BeaconMsg g_pending_verify     = {};
@@ -161,6 +171,7 @@ enum AppState {
     STATE_ESPNOW_TARGET,
     STATE_ATECC_INTRO,  // first-time identity setup — show intro, wait for SELECT
     STATE_ATECC_DONE,   // provisioning complete — show result, any button → ESPNow
+    STATE_WALLET,       // Solana wallet QR code
 };
 
 static AppState g_state        = STATE_MENU;
@@ -170,10 +181,11 @@ static uint8_t  g_last_btns    = 0;
 static int      g_sysinfo_page = 0;   // 0=hardware 1=RNG
 static uint8_t  g_sysinfo_rng[16] = {};
 
-#define MENU_COUNT 2
+#define MENU_COUNT 3
 static const char* MENU_LABELS[MENU_COUNT] = {
     "1. System Info",
     "2. ESPNow Beacon",
+    "3. Solana Wallet",
 };
 
 // ── Button IRQ ────────────────────────────────────────────────────────────────
@@ -552,6 +564,98 @@ static bool do_provision_atecc() {
     return true;
 }
 
+// ── Solana wallet ─────────────────────────────────────────────────────────────
+
+static void base58_encode(const uint8_t *data, size_t len, char *out) {
+    static const char ALPHA[] = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+    uint8_t tmp[32];
+    memcpy(tmp, data, len);
+
+    int leading = 0;
+    for (size_t i = 0; i < len && tmp[i] == 0; i++) leading++;
+
+    char digits[48];
+    int  dlen = 0;
+    bool nonzero = true;
+    while (nonzero) {
+        int rem = 0;
+        nonzero = false;
+        for (size_t i = 0; i < len; i++) {
+            int val = rem * 256 + tmp[i];
+            tmp[i]  = (uint8_t)(val / 58);
+            rem     = val % 58;
+            if (tmp[i]) nonzero = true;
+        }
+        digits[dlen++] = ALPHA[rem];
+    }
+
+    int out_idx = 0;
+    for (int i = 0; i < leading; i++) out[out_idx++] = '1';
+    for (int i = dlen - 1; i >= 0; i--) out[out_idx++] = digits[i];
+    out[out_idx] = '\0';
+}
+
+static void init_wallet() {
+    nvs_handle_t nvs;
+    if (nvs_open("wallet", NVS_READWRITE, &nvs) != ESP_OK) {
+        Serial.println("[wallet] nvs_open failed");
+        return;
+    }
+
+    uint8_t   seed[32];
+    size_t    seed_len = sizeof(seed);
+    esp_err_t err = nvs_get_blob(nvs, "seed", seed, &seed_len);
+
+    if (err == ESP_ERR_NVS_NOT_FOUND) {
+        bool from_atecc = false;
+        if (g_atecc_available || g_atecc.begin(0x60, Wire, Serial)) {
+            g_atecc_available = true;
+            g_atecc.wakeUp();
+            g_atecc.updateRandom32Bytes();
+            memcpy(seed, g_atecc.random32Bytes, 32);
+            g_atecc.sleep();
+            from_atecc = true;
+        }
+        if (!from_atecc) {
+            for (int i = 0; i < 8; i++) {
+                uint32_t r = esp_random();
+                memcpy(seed + i * 4, &r, 4);
+            }
+        }
+        Serial.printf("[wallet] new seed from %s\n", from_atecc ? "ATECC TRNG" : "ESP32 RNG");
+        nvs_set_blob(nvs, "seed", seed, sizeof(seed));
+        nvs_commit(nvs);
+    } else if (err != ESP_OK) {
+        Serial.printf("[wallet] nvs_get_blob err %d\n", err);
+        nvs_close(nvs);
+        return;
+    }
+
+    nvs_close(nvs);
+
+    uint8_t sk[64];  // libsodium: sk = seed || pubkey (64 bytes)
+    crypto_sign_ed25519_seed_keypair(g_wallet_pubkey, sk, seed);
+    sodium_memzero(sk,   sizeof(sk));
+    sodium_memzero(seed, sizeof(seed));
+
+    base58_encode(g_wallet_pubkey, 32, g_wallet_address);
+    g_wallet_ready = true;
+    Serial.printf("[wallet] address: %s\n", g_wallet_address);
+}
+
+static void wallet_regen() {
+    nvs_handle_t nvs;
+    if (nvs_open("wallet", NVS_READWRITE, &nvs) == ESP_OK) {
+        nvs_erase_key(nvs, "seed");
+        nvs_commit(nvs);
+        nvs_close(nvs);
+    }
+    memset(g_wallet_pubkey,  0, sizeof(g_wallet_pubkey));
+    memset(g_wallet_address, 0, sizeof(g_wallet_address));
+    g_wallet_ready = false;
+    init_wallet();
+}
+
 static void draw_atecc_intro() {
     display.setFullWindow();
     display.firstPage();
@@ -604,6 +708,62 @@ static void draw_atecc_done(bool success) {
             display.print("without signatures.");
         }
         page_footer("any button to continue");
+    } while (display.nextPage());
+    display.hibernate();
+}
+
+// QR render context — set before calling esp_qrcode_generate inside page loop
+static struct { int x0, y0, scale; } s_qr_ctx;
+
+static void qr_render_cb(esp_qrcode_handle_t qrcode) {
+    int sz = esp_qrcode_get_size(qrcode);
+    for (int r = 0; r < sz; r++)
+        for (int c = 0; c < sz; c++)
+            if (esp_qrcode_get_module(qrcode, c, r))
+                display.fillRect(s_qr_ctx.x0 + c * s_qr_ctx.scale,
+                                 s_qr_ctx.y0 + r * s_qr_ctx.scale,
+                                 s_qr_ctx.scale, s_qr_ctx.scale, GxEPD_BLACK);
+}
+
+static void draw_wallet_screen() {
+    display.setFullWindow();
+    display.firstPage();
+    do {
+        display.fillScreen(GxEPD_WHITE);
+        page_header("SOL WALLET");
+        display.setFont(&FreeMono9pt7b);
+        display.setTextColor(GxEPD_BLACK);
+
+        if (!g_wallet_ready) {
+            display.setCursor(8, 70);
+            display.print("Wallet not ready.");
+        } else {
+            // Version 4 QR in byte mode with ECC_MED fits 44-char Solana address → 33×33 modules
+            int scale = 2;
+            int sz    = 33;
+            s_qr_ctx.scale = scale;
+            s_qr_ctx.x0    = (display.width()  - sz * scale) / 2;
+            s_qr_ctx.y0    = 34 + (111 - sz * scale) / 2;  // centered in y=34..145 content area
+
+            esp_qrcode_config_t cfg;
+            cfg.display_func       = qr_render_cb;
+            cfg.max_qrcode_version = 4;
+            cfg.qrcode_ecc_level   = ESP_QRCODE_ECC_MED;
+            esp_qrcode_generate(&cfg, g_wallet_address);
+
+            // Abbreviated address: first 6 ... last 6
+            char short_addr[20];
+            size_t alen = strlen(g_wallet_address);
+            snprintf(short_addr, sizeof(short_addr), "%.6s...%.6s",
+                     g_wallet_address,
+                     alen >= 6 ? g_wallet_address + alen - 6 : g_wallet_address);
+
+            int16_t tx, ty; uint16_t tw, th;
+            display.getTextBounds(short_addr, 0, 0, &tx, &ty, &tw, &th);
+            display.setCursor((display.width() - (int16_t)tw) / 2, 138);
+            display.print(short_addr);
+        }
+        page_footer("SEL:regen  CXL:back");
     } while (display.nextPage());
     display.hibernate();
 }
@@ -1320,6 +1480,7 @@ static void dispatch_render() {
         case STATE_ESPNOW_TARGET: draw_espnow_target();       break;
         case STATE_ATECC_INTRO:   draw_atecc_intro();         break;
         case STATE_ATECC_DONE:    draw_atecc_done(g_atecc_ok); break;
+        case STATE_WALLET:        draw_wallet_screen();        break;
     }
     g_needs_redraw = false;
 }
@@ -1359,6 +1520,9 @@ static void handle_buttons(uint8_t pressed) {
                         } else {
                             g_state = STATE_ESPNOW;
                         }
+                        break;
+                    case 2:
+                        g_state = STATE_WALLET;
                         break;
                 }
                 g_needs_redraw = true;
@@ -1532,6 +1696,11 @@ static void handle_buttons(uint8_t pressed) {
                 { g_state = STATE_ESPNOW; g_needs_redraw = true; }
             break;
 
+        case STATE_WALLET:
+            if (pressed & BTN_CANCEL) { g_state = STATE_MENU; g_needs_redraw = true; }
+            if (pressed & BTN_SELECT) { wallet_regen(); g_needs_redraw = true; }
+            break;
+
         default:
             if (pressed & BTN_CANCEL)
                 { g_state = STATE_MENU; g_needs_redraw = true; }
@@ -1558,6 +1727,15 @@ void setup() {
     memset(g_captures, 0, MAX_CAPTURES * sizeof(CaptureRecord));
 
     init_peripherals();
+
+    // Initialize NVS partition (required before nvs_open; idempotent if already up)
+    esp_err_t nvs_ret = nvs_flash_init();
+    if (nvs_ret == ESP_ERR_NVS_NO_FREE_PAGES || nvs_ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        nvs_flash_erase();
+        nvs_flash_init();
+    }
+
+    init_wallet();
 
     esp_sleep_wakeup_cause_t cause = esp_sleep_get_wakeup_cause();
 
