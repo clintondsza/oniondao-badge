@@ -73,7 +73,9 @@ popup, stores approved code in SPIFFS, runs it, and responds on
 Installed scripts are stored as `/scripts_*.lua`. Downloaded image assets are
 stored as `/images_*.pbm` or `/images_*.bmp`. The badge's home menu opens a
 script explorer that lists both manifest-downloaded scripts and server-pushed
-scripts from SPIFFS; selecting a script runs it locally.
+scripts from SPIFFS. In the script explorer, `SELECT` runs the highlighted
+script, `LEFT` deletes it from the badge, `RIGHT` syncs scripts, and `CANCEL`
+returns home.
 
 The handshake routes currently only return `onionId` and `status`. After a badge
 is linked, the firmware refreshes its owner profile by Onion ID with
@@ -170,6 +172,7 @@ keygen confirm
 handshake
 scripts
 run <script_name.lua>
+delete <script_name.lua>
 state
 help
 ```

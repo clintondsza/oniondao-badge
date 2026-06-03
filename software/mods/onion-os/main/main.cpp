@@ -665,7 +665,8 @@ static void drawScriptExplorer() {
         printString(prefix + clipped(storedScriptDisplayName(g_scripts[idx]), 24), 52 + row * 20,
             idx == g_scriptSelection ? &FreeMonoBold9pt7b : &FreeMono9pt7b);
     }
-    printString("SELECT run  CANCEL home", 166);
+    printString("SELECT run LEFT delete", 146);
+    printString("RIGHT sync CANCEL home", 166);
 }
 
 static void drawLinkPrompt() {
@@ -1899,6 +1900,33 @@ static bool validScriptFileName(const String& name) {
     return validAssetFileName(name, ".lua");
 }
 
+static bool validStoredScriptPath(const String& path) {
+    if (!path.startsWith("/scripts_") || !path.endsWith(".lua")) return false;
+    return validScriptFileName(storedScriptDisplayName(path));
+}
+
+static bool deleteStoredScript(const String& path) {
+    if (!validStoredScriptPath(path)) {
+        setLog("Bad script path");
+        return false;
+    }
+    String name = storedScriptDisplayName(path);
+    if (!SPIFFS.remove(path)) {
+        setLog("Lua delete failed");
+        return false;
+    }
+    setLog("Deleted " + clipped(name, 20));
+    return true;
+}
+
+static void deleteScriptByName(const String& name) {
+    if (!validScriptFileName(name)) {
+        setLog("Bad script name");
+        return;
+    }
+    deleteStoredScript("/scripts_" + name);
+}
+
 static String pushedScriptFileName() {
     if (validScriptFileName(g_luaPrompt.fileName)) return g_luaPrompt.fileName;
     String suffix = g_luaPrompt.scriptId.length() ? g_luaPrompt.scriptId : g_luaPrompt.requestId;
@@ -2049,6 +2077,7 @@ static void printHelp() {
     Serial.println("  handshake");
     Serial.println("  scripts");
     Serial.println("  run <script_name.lua>");
+    Serial.println("  delete <script_name.lua>");
     Serial.println("  state");
     Serial.println("  help");
     Serial.println();
@@ -2153,6 +2182,8 @@ static void handleSerial() {
             syncScripts();
         } else if (args[0] == "run" && args.size() >= 2) {
             runScriptByName(args[1]);
+        } else if ((args[0] == "delete" || args[0] == "rm") && args.size() >= 2) {
+            deleteScriptByName(args[1]);
         } else if (args[0] == "state") {
             Serial.printf("hardwareId=%s\n", g_identity.hardwareId.c_str());
             Serial.printf("onionId=%llu\n", (unsigned long long)g_identity.onionId);
@@ -2192,17 +2223,19 @@ static void handleButtons() {
         if (pressed & BTN_SELECT) sendLuaPushResponse(true);
         if (pressed & BTN_CANCEL) sendLuaPushResponse(false);
     } else if (g_screen == SCREEN_SCRIPT_EXPLORER) {
-        if ((pressed & BTN_CANCEL) || (pressed & BTN_LEFT)) {
+        if (pressed & BTN_CANCEL) {
             g_screen = SCREEN_STATUS;
-        }
-        if ((pressed & BTN_UP) && g_scriptSelection > 0) g_scriptSelection--;
-        if ((pressed & BTN_DOWN) && g_scriptSelection + 1 < (int)g_scripts.size()) g_scriptSelection++;
-        if ((pressed & BTN_RIGHT)) {
+        } else if ((pressed & BTN_LEFT) && !g_scripts.empty()) {
+            deleteStoredScript(g_scripts[g_scriptSelection]);
+            refreshScriptList();
+        } else if ((pressed & BTN_RIGHT)) {
             syncScripts();
             refreshScriptList();
-        }
-        if ((pressed & BTN_SELECT) && !g_scripts.empty()) {
+        } else if ((pressed & BTN_SELECT) && !g_scripts.empty()) {
             runStoredScript(g_scripts[g_scriptSelection]);
+        } else {
+            if ((pressed & BTN_UP) && g_scriptSelection > 0) g_scriptSelection--;
+            if ((pressed & BTN_DOWN) && g_scriptSelection + 1 < (int)g_scripts.size()) g_scriptSelection++;
         }
     } else {
         if (pressed & BTN_UP) {
