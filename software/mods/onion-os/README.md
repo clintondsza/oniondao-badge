@@ -11,6 +11,7 @@ other badge firmware in this repo.
 - Persistent per-badge hardware ID stored in NVS.
 - Hardcoded WiFi for `CIC Guest` / `1nnovation`.
 - Hardcoded Onion API server URL: `https://oniondao.dev`.
+- Hardcoded MQTT broker URL: `mqtt://shortline.proxy.rlwy.net:20928`.
 - HTTP badge handshake:
   - `POST /api/badge/handshake`
 - MQTT badge bridge:
@@ -86,8 +87,15 @@ Scripts receive a small global `onion` table:
 - `onion.wallet()` returns the configured Solana public key, if any.
 - `onion.clear_display()` clears the e-paper display and leaves Lua in control
   of the screen until the next button press.
+- `onion.release_display()` returns screen ownership to Onion OS after a Lua
+  script has drawn to the display.
 - `onion.display_bitmap(name, x, y, clear)` draws a downloaded PBM or BMP image
   asset. Pass `-1` for `x` or `y` to center that axis. `clear` defaults to true.
+- `onion.images()` returns a table of downloaded PBM and BMP image asset names.
+- `onion.buttons()` returns a table with the current badge button state:
+  `left`, `down`, `up`, `right`, `select`, `cancel`, and integer `mask`.
+- `onion.button_mask(name)` returns the integer mask for a badge button name.
+- `onion.sleep(ms)` pauses the Lua script for up to 60 seconds.
 - `onion.gpio_read(pin, mode)` reads an expansion GPIO and returns `0` or `1`.
 - `onion.gpio_poll(pin, target, timeout_ms, interval_ms, mode)` polls an
   expansion GPIO until it equals `target`, returning `matched, value,
@@ -133,6 +141,10 @@ local ok, err = onion.display_bitmap("poster.pbm", -1, -1)
 if not ok then onion.log(err) end
 ```
 
+Local example scripts live in [`scripts/`](scripts/). `image-browser.lua`
+enumerates downloaded PBM/BMP assets and lets the user move through them with
+the badge buttons.
+
 The inspected server currently does not expose a script manifest route, so set
 the manifest URL explicitly.
 
@@ -148,7 +160,7 @@ Runtime serial commands are persisted in NVS:
 
 ```text
 api-key <badge_api_key>
-mqtt <uri> [username] [password] [prefix]
+mqtt-auth [username] [password] [prefix]
 scripts-url <manifest_url>
 wallet
 keygen confirm
@@ -163,7 +175,7 @@ Examples:
 
 ```text
 api-key badge-api-secret
-mqtt mqtts://broker.example.com badge badge-password oniondao
+mqtt-auth badge badge-password oniondao
 wallet
 handshake
 ```

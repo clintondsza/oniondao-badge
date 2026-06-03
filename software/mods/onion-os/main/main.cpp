@@ -50,6 +50,7 @@ extern "C" {
 #define ONION_HARDCODED_WIFI_SSID "CIC Guest"
 #define ONION_HARDCODED_WIFI_PASSWORD "1nnovation"
 #define ONION_HARDCODED_SERVER_BASE_URL "https://oniondao.dev"
+#define ONION_HARDCODED_MQTT_URI "mqtt://shortline.proxy.rlwy.net:20928"
 
 #define TCA9534_ADDR   0x20
 #define TCA9534_INPUT  0x00
@@ -80,6 +81,7 @@ extern "C" {
 #define SOLANA_KEY_NONCE_LEN crypto_aead_xchacha20poly1305_ietf_NPUBBYTES
 #define SOLANA_KEY_MAC_LEN crypto_aead_xchacha20poly1305_ietf_ABYTES
 #define LUA_GPIO_POLL_MAX_MS 30000
+#define LUA_SLEEP_MAX_MS 60000
 
 GxEPD2_BW<GxEPD2_270_GDEY027T91, GxEPD2_270_GDEY027T91::HEIGHT> display(
     GxEPD2_270_GDEY027T91(PIN_EPD_CS, PIN_EPD_DC, PIN_EPD_RST, PIN_EPD_BUSY)
@@ -175,6 +177,20 @@ static uint8_t g_ateccSerial[ATECC_SERIAL_LEN] = {};
 
 static const int kLuaReadableGpios[] = {48, 47, 19, 42, 41, 40, 38, 39, 16, 15, 7, 6, 5, 4};
 
+struct LuaButton {
+    const char* name;
+    uint8_t mask;
+};
+
+static const LuaButton kLuaButtons[] = {
+    {"left", BTN_LEFT},
+    {"down", BTN_DOWN},
+    {"up", BTN_UP},
+    {"right", BTN_RIGHT},
+    {"select", BTN_SELECT},
+    {"cancel", BTN_CANCEL},
+};
+
 static String prefString(const char* key, const char* fallback) {
     String value = g_prefs.getString(key, "");
     return value.length() ? value : String(fallback);
@@ -206,7 +222,7 @@ static void loadConfig() {
     g_config.wifiPassword = ONION_HARDCODED_WIFI_PASSWORD;
     g_config.serverBaseUrl = ONION_HARDCODED_SERVER_BASE_URL;
     g_config.badgeApiKey = prefString("api_key", ONION_DEFAULT_BADGE_API_KEY);
-    g_config.mqttUri = prefString("mqtt_uri", ONION_DEFAULT_MQTT_URI);
+    g_config.mqttUri = ONION_HARDCODED_MQTT_URI;
     g_config.mqttUsername = prefString("mqtt_user", ONION_DEFAULT_MQTT_USERNAME);
     g_config.mqttPassword = prefString("mqtt_pass", ONION_DEFAULT_MQTT_PASSWORD);
     g_config.mqttTopicPrefix = prefString("mqtt_prefix", ONION_DEFAULT_MQTT_TOPIC_PREFIX);
@@ -1593,6 +1609,12 @@ static int luaOnionClearDisplay(lua_State*) {
     return 0;
 }
 
+static int luaOnionReleaseDisplay(lua_State*) {
+    g_luaDisplayActive = false;
+    g_needsRedraw = true;
+    return 0;
+}
+
 static int luaOnionDisplayBitmap(lua_State* L) {
     String name = luaL_checkstring(L, 1);
     int x = (int)luaL_optinteger(L, 2, 0);
@@ -1613,6 +1635,74 @@ static int luaOnionDisplayBitmap(lua_State* L) {
     renderBitmap(bitmap, x, y, clearScreen);
     lua_pushboolean(L, true);
     return 1;
+}
+
+static int luaOnionImages(lua_State* L) {
+    lua_newtable(L);
+
+    File root = SPIFFS.open("/");
+    if (!root) return 1;
+
+    int index = 1;
+    File file = root.openNextFile();
+    while (file) {
+        String name = file.name();
+        if (!file.isDirectory() && name.startsWith("/images_")) {
+            name.remove(0, 8);
+            if (validImageFileName(name)) {
+                lua_pushstring(L, name.c_str());
+                lua_rawseti(L, -2, index++);
+            }
+        }
+        file = root.openNextFile();
+    }
+
+    return 1;
+}
+
+static bool luaButtonMaskForName(const char* name, uint8_t& mask) {
+    for (const LuaButton& button : kLuaButtons) {
+        if (strcmp(name, button.name) == 0) {
+            mask = button.mask;
+            return true;
+        }
+    }
+    return false;
+}
+
+static int luaOnionButtonMask(lua_State* L) {
+    const char* name = luaL_checkstring(L, 1);
+    uint8_t mask = 0;
+    if (!luaButtonMaskForName(name, mask)) {
+        lua_pushnil(L);
+        lua_pushfstring(L, "Bad button name: %s", name);
+        return 2;
+    }
+    lua_pushinteger(L, mask);
+    return 1;
+}
+
+static int luaOnionButtons(lua_State* L) {
+    uint8_t buttons = readButtons();
+    g_lastButtons = buttons;
+    lua_newtable(L);
+
+    lua_pushinteger(L, buttons);
+    lua_setfield(L, -2, "mask");
+
+    for (const LuaButton& button : kLuaButtons) {
+        lua_pushboolean(L, (buttons & button.mask) != 0);
+        lua_setfield(L, -2, button.name);
+    }
+
+    return 1;
+}
+
+static int luaOnionSleep(lua_State* L) {
+    uint32_t ms = (uint32_t)luaL_optinteger(L, 1, 0);
+    if (ms > LUA_SLEEP_MAX_MS) ms = LUA_SLEEP_MAX_MS;
+    delay(ms);
+    return 0;
 }
 
 static int luaOnionGpioRead(lua_State* L) {
@@ -1664,8 +1754,18 @@ static void registerOnionLua(lua_State* L) {
     lua_setfield(L, -2, "wallet");
     lua_pushcfunction(L, luaOnionClearDisplay);
     lua_setfield(L, -2, "clear_display");
+    lua_pushcfunction(L, luaOnionReleaseDisplay);
+    lua_setfield(L, -2, "release_display");
     lua_pushcfunction(L, luaOnionDisplayBitmap);
     lua_setfield(L, -2, "display_bitmap");
+    lua_pushcfunction(L, luaOnionImages);
+    lua_setfield(L, -2, "images");
+    lua_pushcfunction(L, luaOnionButtons);
+    lua_setfield(L, -2, "buttons");
+    lua_pushcfunction(L, luaOnionButtonMask);
+    lua_setfield(L, -2, "button_mask");
+    lua_pushcfunction(L, luaOnionSleep);
+    lua_setfield(L, -2, "sleep");
     lua_pushcfunction(L, luaOnionGpioRead);
     lua_setfield(L, -2, "gpio_read");
     lua_pushcfunction(L, luaOnionGpioPoll);
@@ -1682,6 +1782,7 @@ static bool runLuaSource(const String& source, const String& name) {
     luaL_openlibs(L);
     registerOnionLua(L);
 
+    String logBeforeRun = g_log;
     int status = luaL_loadbuffer(L, source.c_str(), source.length(), name.c_str());
     if (status == LUA_OK) status = lua_pcall(L, 0, 0, 0);
     if (status != LUA_OK) {
@@ -1695,7 +1796,7 @@ static bool runLuaSource(const String& source, const String& name) {
     if (g_luaDisplayActive) {
         Serial.printf("[onion-os] Lua ran %s\n", name.c_str());
     } else {
-        setLog("Lua ran " + name);
+        if (g_log == logBeforeRun) setLog("Lua ran " + name);
     }
     return true;
 }
@@ -1873,7 +1974,7 @@ static void printHelp() {
     Serial.println();
     Serial.println("Onion OS serial commands:");
     Serial.println("  api-key <badge_api_key>");
-    Serial.println("  mqtt <uri> [username] [password] [prefix]");
+    Serial.println("  mqtt-auth [username] [password] [prefix]");
     Serial.println("  scripts-url <manifest_url>");
     Serial.println("  wallet");
     Serial.println("  keygen confirm");
@@ -1929,12 +2030,17 @@ static void handleSerial() {
             g_config.badgeApiKey = args[1];
             saveConfigValue("api_key", g_config.badgeApiKey);
             setLog("API key saved");
-        } else if (args[0] == "mqtt" && args.size() >= 2) {
-            g_config.mqttUri = args[1];
-            g_config.mqttUsername = args.size() >= 3 ? args[2] : "";
-            g_config.mqttPassword = args.size() >= 4 ? args[3] : "";
-            g_config.mqttTopicPrefix = args.size() >= 5 ? args[4] : "oniondao";
-            saveConfigValue("mqtt_uri", g_config.mqttUri);
+        } else if (args[0] == "mqtt" || args[0] == "mqtt-auth") {
+            g_config.mqttUri = ONION_HARDCODED_MQTT_URI;
+            size_t firstAuthArg = 1;
+            if (args[0] == "mqtt" && args.size() >= 2 &&
+                (args[1].indexOf("://") >= 0 || args[1].indexOf(':') >= 0)) {
+                firstAuthArg = 2;
+            }
+            g_config.mqttUsername = args.size() > firstAuthArg ? args[firstAuthArg] : "";
+            g_config.mqttPassword = args.size() > firstAuthArg + 1 ? args[firstAuthArg + 1] : "";
+            g_config.mqttTopicPrefix = args.size() > firstAuthArg + 2 ? args[firstAuthArg + 2] : "oniondao";
+            g_prefs.remove("mqtt_uri");
             saveConfigValue("mqtt_user", g_config.mqttUsername);
             saveConfigValue("mqtt_pass", g_config.mqttPassword);
             saveConfigValue("mqtt_prefix", g_config.mqttTopicPrefix);
@@ -1944,7 +2050,7 @@ static void handleSerial() {
                 g_mqtt = nullptr;
                 g_mqttConnected = false;
             }
-            setLog("MQTT config saved");
+            setLog("MQTT auth saved; URL hardcoded");
         } else if (args[0] == "scripts-url" && args.size() >= 2) {
             g_config.scriptManifestUrl = args[1];
             saveConfigValue("script_url", g_config.scriptManifestUrl);
