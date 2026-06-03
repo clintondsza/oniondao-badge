@@ -203,6 +203,8 @@ scripts/build-flash.sh --monitor
 ```
 
 Pass `--port /dev/cu.usbserial-10` if you want to flash a specific port.
+Set `IDF_EXPORT=/path/to/esp-idf/export.sh` if your ESP-IDF install is not in a
+common location.
 
 The project uses the same 8 MB flash / OPI PSRAM defaults as the existing badge
 mods.

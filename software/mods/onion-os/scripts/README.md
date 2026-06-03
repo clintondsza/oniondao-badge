@@ -13,6 +13,11 @@ Run it from the Onion OS project directory. Use `--monitor` to open the serial
 monitor after flashing, or `--port /dev/cu.usbserial-10` to choose a specific
 serial port.
 
+The helper auto-loads common ESP-IDF installs, including
+`~/.espressif/v5.5.4/esp-idf/export.sh`. Set
+`IDF_EXPORT=/path/to/esp-idf/export.sh` if your ESP-IDF install lives somewhere
+else.
+
 ## Lua Scripts
 
 Example Lua scripts in this directory are meant to be copied into the Onion OS

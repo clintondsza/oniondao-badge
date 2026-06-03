@@ -22,6 +22,7 @@ Options:
   -h, --help         Show this help
 
 Environment:
+  IDF_EXPORT=/path/to/export.sh  ESP-IDF export script to source
   PORT=/dev/cu.usbserial-10  Same as --port
   BAUD=921600                Same as --baud
 EOF
@@ -62,9 +63,44 @@ done
 require_command() {
   if ! command -v "$1" >/dev/null 2>&1; then
     echo "Required command not found: $1" >&2
-    echo "Source ESP-IDF first, for example: . \$HOME/esp/esp-idf/export.sh" >&2
+    echo "Install ESP-IDF or pass IDF_EXPORT=/path/to/esp-idf/export.sh" >&2
     exit 1
   fi
+}
+
+source_esp_idf() {
+  command -v idf.py >/dev/null 2>&1 && return 0
+
+  local candidates=()
+  if [[ -n "${IDF_EXPORT:-}" ]]; then
+    candidates+=("$IDF_EXPORT")
+  fi
+
+  candidates+=(
+    "$HOME/.espressif/v5.5.4/esp-idf/export.sh"
+    "$HOME/.espressif-5.5.4/v5.5.4/esp-idf/export.sh"
+    "$HOME/esp/esp-idf/export.sh"
+    "$HOME"/.espressif/v5.5.*/esp-idf/export.sh
+    "$HOME"/.espressif-5.5.*/v5.5.*/esp-idf/export.sh
+    "$HOME/.platformio/packages/framework-espidf/export.sh"
+  )
+
+  local export_script
+  local export_log="${TMPDIR:-/tmp}/onion-os-idf-export.log"
+  for export_script in "${candidates[@]}"; do
+    if [[ -f "$export_script" ]]; then
+      echo "Loading ESP-IDF from $export_script"
+      # shellcheck disable=SC1090
+      if . "$export_script" >"$export_log" 2>&1; then
+        command -v idf.py >/dev/null 2>&1 && return 0
+      else
+        echo "Failed to load ESP-IDF from $export_script" >&2
+        tail -n 40 "$export_log" >&2 || true
+      fi
+    fi
+  done
+
+  return 1
 }
 
 esptool_command() {
@@ -115,11 +151,12 @@ detect_port() {
   return 1
 }
 
+source_esp_idf || true
 require_command idf.py
 ESPTOOL="$(esptool_command)"
 if [[ -z "$ESPTOOL" ]]; then
   echo "Required command not found: esptool.py or esptool" >&2
-  echo "Source ESP-IDF first, for example: . \$HOME/esp/esp-idf/export.sh" >&2
+  echo "Install ESP-IDF or pass IDF_EXPORT=/path/to/esp-idf/export.sh" >&2
   exit 1
 fi
 

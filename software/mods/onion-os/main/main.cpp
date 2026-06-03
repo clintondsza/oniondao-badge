@@ -26,6 +26,7 @@ extern "C" {
 #include <Fonts/FreeMonoBold18pt7b.h>
 
 #include <algorithm>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -69,7 +70,7 @@ extern "C" {
 #define WIFI_CONNECT_TIMEOUT_MS 15000
 #define HANDSHAKE_INTERVAL_MS 30000
 #define MQTT_RECONNECT_INTERVAL_MS 5000
-#define UI_REFRESH_INTERVAL_MS 1000
+#define MQTT_HANDSHAKE_ACCEPT_WINDOW_MS 10000
 #define BOOT_SPLASH_MS 3000
 #define MAX_SCRIPT_BYTES (64 * 1024)
 #define MAX_IMAGE_BYTES (192 * 1024)
@@ -168,7 +169,8 @@ static bool g_needsRedraw = true;
 static uint8_t g_lastButtons = 0;
 static uint32_t g_lastHandshake = 0;
 static uint32_t g_lastMqttAttempt = 0;
-static uint32_t g_lastUiRefresh = 0;
+static uint32_t g_mqttHandshakeSentAt = 0;
+static bool g_mqttHandshakePending = false;
 static String g_log = "Booting";
 static int g_homeSelection = 0;
 static int g_scriptSelection = 0;
@@ -203,9 +205,10 @@ static void saveConfigValue(const char* key, const String& value) {
 }
 
 static void setLog(const String& message) {
+    bool changed = g_log != message;
     g_log = message;
     Serial.printf("[onion-os] %s\n", message.c_str());
-    if (!g_luaDisplayActive) g_needsRedraw = true;
+    if (changed && !g_luaDisplayActive) g_needsRedraw = true;
 }
 
 static String generateHardwareId() {
@@ -504,6 +507,20 @@ static String topic(const String& suffix) {
     return prefix + "/" + suffix;
 }
 
+static uint64_t handshakeOnionIdFromTopic(const String& incomingTopic) {
+    String base = topic("badge/");
+    if (!incomingTopic.startsWith(base) || !incomingTopic.endsWith("/handshake/accepted")) return 0;
+
+    int idStart = base.length();
+    int idEnd = incomingTopic.indexOf('/', idStart);
+    if (idEnd <= idStart) return 0;
+
+    String idText = incomingTopic.substring(idStart, idEnd);
+    char* end = nullptr;
+    uint64_t onionId = strtoull(idText.c_str(), &end, 10);
+    return (end && *end == '\0') ? onionId : 0;
+}
+
 static void initPeripherals() {
     pinMode(PIN_PWR, OUTPUT);
     // GPIO18 drives the battery power-hold latch. Keep it released so the
@@ -782,6 +799,17 @@ static int jsonInt(cJSON* obj, const char* key, int fallback = 0) {
     return cJSON_IsNumber(item) ? item->valueint : fallback;
 }
 
+static uint64_t jsonUint64(cJSON* obj, const char* key, uint64_t fallback = 0) {
+    cJSON* item = cJSON_GetObjectItemCaseSensitive(obj, key);
+    if (cJSON_IsNumber(item)) return (uint64_t)item->valuedouble;
+    if (cJSON_IsString(item) && item->valuestring) {
+        char* end = nullptr;
+        uint64_t value = strtoull(item->valuestring, &end, 10);
+        return (end && *end == '\0') ? value : fallback;
+    }
+    return fallback;
+}
+
 static bool jsonBool(cJSON* obj, const char* key, bool fallback = false) {
     cJSON* item = cJSON_GetObjectItemCaseSensitive(obj, key);
     return cJSON_IsBool(item) ? cJSON_IsTrue(item) : fallback;
@@ -841,17 +869,39 @@ static void updateProfileFromJson(cJSON* root) {
 
 static void subscribeBadgeTopics();
 
-static bool handleHandshakeResponse(const String& response) {
+static bool mqttHandshakeResponseMatchesBadge(cJSON* root, const String& incomingTopic, uint64_t onionId) {
+    if (!incomingTopic.length()) return true;
+
+    String hardwareId = jsonString(root, "hardwareId");
+    if (hardwareId.length()) return hardwareId == g_identity.hardwareId;
+
+    uint64_t topicOnionId = handshakeOnionIdFromTopic(incomingTopic);
+    if (g_identity.onionId) {
+        return (!topicOnionId || topicOnionId == g_identity.onionId) &&
+            (!onionId || onionId == g_identity.onionId);
+    }
+
+    bool recentHandshake = g_mqttHandshakePending &&
+        millis() - g_mqttHandshakeSentAt <= MQTT_HANDSHAKE_ACCEPT_WINDOW_MS;
+    return recentHandshake && topicOnionId && onionId == topicOnionId;
+}
+
+static bool handleHandshakeResponse(const String& response, const String& incomingTopic = String()) {
     cJSON* root = cJSON_Parse(response.c_str());
     if (!root) return false;
-    uint64_t onionId = (uint64_t)jsonInt(root, "onionId", 0);
+    uint64_t onionId = jsonUint64(root, "onionId", 0);
     String status = jsonString(root, "status");
     if (!onionId) {
         cJSON_Delete(root);
         return false;
     }
+    if (!mqttHandshakeResponseMatchesBadge(root, incomingTopic, onionId)) {
+        cJSON_Delete(root);
+        return false;
+    }
 
     g_identity.onionId = onionId;
+    g_mqttHandshakePending = false;
     if (status.length()) g_identity.status = status;
     g_identity.linked = g_identity.status == "linked";
     updateProfileFromJson(root);
@@ -876,12 +926,21 @@ static bool publishMqtt(const String& mqttTopic, const String& payload) {
 }
 
 static void doMqttHandshake() {
-    String body = "{\"hardwareId\":\"" + g_identity.hardwareId + "\",\"firmware\":\"onion-os\",\"transport\":\"mqtt\"}";
-    publishMqtt(topic("badge/handshake"), body);
+    String replyTo = topic(String("badge/hardware/") + g_identity.hardwareId + "/handshake/accepted");
+    String body = "{\"hardwareId\":\"" + jsonEscape(g_identity.hardwareId) +
+        "\",\"firmware\":\"onion-os\",\"transport\":\"mqtt\",\"replyTo\":\"" + jsonEscape(replyTo) + "\"}";
+    if (publishMqtt(topic("badge/handshake"), body)) {
+        g_mqttHandshakePending = true;
+        g_mqttHandshakeSentAt = millis();
+    }
 }
 
 static void subscribeBadgeTopics() {
-    if (!g_mqtt || !g_mqttConnected || !g_identity.onionId) return;
+    if (!g_mqtt || !g_mqttConnected) return;
+    esp_mqtt_client_subscribe(g_mqtt, topic("badge/+/handshake/accepted").c_str(), 1);
+    esp_mqtt_client_subscribe(g_mqtt, topic(String("badge/hardware/") + g_identity.hardwareId + "/handshake/accepted").c_str(), 1);
+
+    if (!g_identity.onionId) return;
     String base = "badge/" + String((unsigned long long)g_identity.onionId) + "/";
     esp_mqtt_client_subscribe(g_mqtt, topic(base + "handshake/accepted").c_str(), 1);
     esp_mqtt_client_subscribe(g_mqtt, topic(base + "link/request").c_str(), 1);
@@ -933,7 +992,9 @@ static void handleMqttPayload(const String& incomingTopic, const String& payload
     }
 
     if (incomingTopic.endsWith("/handshake/accepted")) {
-        handleHandshakeResponse(payload);
+        if (!handleHandshakeResponse(payload, incomingTopic)) {
+            Serial.printf("[onion-os] ignored MQTT handshake on %s\n", incomingTopic.c_str());
+        }
     } else if (incomingTopic.endsWith("/link/request")) {
         handleLinkRequest(root);
     } else if (incomingTopic.endsWith("/transaction/request")) {
@@ -2201,11 +2262,6 @@ void loop() {
     if (millis() - g_lastHandshake > HANDSHAKE_INTERVAL_MS) {
         g_lastHandshake = millis();
         if (g_mqttConnected) doMqttHandshake();
-    }
-
-    if (millis() - g_lastUiRefresh > UI_REFRESH_INTERVAL_MS) {
-        g_lastUiRefresh = millis();
-        if (g_screen == SCREEN_STATUS && !g_luaDisplayActive) g_needsRedraw = true;
     }
 
     redraw();
