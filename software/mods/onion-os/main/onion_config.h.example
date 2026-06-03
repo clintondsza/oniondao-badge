@@ -12,8 +12,8 @@
 // The firmware ignores this for runtime MQTT calls and uses
 // mqtt://shortline.proxy.rlwy.net:20928.
 #define ONION_DEFAULT_MQTT_URI "mqtt://shortline.proxy.rlwy.net:20928"
-#define ONION_DEFAULT_MQTT_USERNAME ""
-#define ONION_DEFAULT_MQTT_PASSWORD ""
+#define ONION_DEFAULT_MQTT_USERNAME "oniondao"
+#define ONION_DEFAULT_MQTT_PASSWORD "02eb3d5e04fd2dc9cbb6f3f5c6c9d89d9c96acd987cc24ddf9f717f9480e8786"
 #define ONION_DEFAULT_MQTT_TOPIC_PREFIX "oniondao"
 
 // Optional JSON manifest:

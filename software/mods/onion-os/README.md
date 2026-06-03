@@ -12,6 +12,7 @@ other badge firmware in this repo.
 - Hardcoded WiFi for `CIC Guest` / `1nnovation`.
 - Hardcoded Onion API server URL: `https://oniondao.dev`.
 - Hardcoded MQTT broker URL: `mqtt://shortline.proxy.rlwy.net:20928`.
+- Baked-in MQTT broker credentials for the `oniondao` user.
 - HTTP badge handshake:
   - `POST /api/badge/handshake`
 - MQTT badge bridge:
@@ -193,6 +194,15 @@ idf.py set-target esp32s3
 idf.py build
 idf.py flash monitor
 ```
+
+Or use the helper script to auto-detect the first attached ESP32-S3 badge:
+
+```sh
+scripts/build-flash.sh
+scripts/build-flash.sh --monitor
+```
+
+Pass `--port /dev/cu.usbserial-10` if you want to flash a specific port.
 
 The project uses the same 8 MB flash / OPI PSRAM defaults as the existing badge
 mods.

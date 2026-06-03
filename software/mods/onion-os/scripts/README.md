@@ -1,4 +1,19 @@
-# Onion OS Lua Scripts
+# Onion OS Scripts
+
+## Build and Flash Helper
+
+`build-flash.sh` builds Onion OS and flashes the first attached ESP32-S3 board
+it can find:
+
+```sh
+scripts/build-flash.sh
+```
+
+Run it from the Onion OS project directory. Use `--monitor` to open the serial
+monitor after flashing, or `--port /dev/cu.usbserial-10` to choose a specific
+serial port.
+
+## Lua Scripts
 
 Example Lua scripts in this directory are meant to be copied into the Onion OS
 script registry or served through the script manifest.

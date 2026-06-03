@@ -41,8 +41,8 @@ extern "C" {
 #define ONION_DEFAULT_SERVER_BASE_URL "https://oniondao.dev"
 #define ONION_DEFAULT_BADGE_API_KEY ""
 #define ONION_DEFAULT_MQTT_URI ""
-#define ONION_DEFAULT_MQTT_USERNAME ""
-#define ONION_DEFAULT_MQTT_PASSWORD ""
+#define ONION_DEFAULT_MQTT_USERNAME "oniondao"
+#define ONION_DEFAULT_MQTT_PASSWORD "02eb3d5e04fd2dc9cbb6f3f5c6c9d89d9c96acd987cc24ddf9f717f9480e8786"
 #define ONION_DEFAULT_MQTT_TOPIC_PREFIX "oniondao"
 #define ONION_DEFAULT_SCRIPT_MANIFEST_URL ""
 #endif
@@ -51,6 +51,8 @@ extern "C" {
 #define ONION_HARDCODED_WIFI_PASSWORD "1nnovation"
 #define ONION_HARDCODED_SERVER_BASE_URL "https://oniondao.dev"
 #define ONION_HARDCODED_MQTT_URI "mqtt://shortline.proxy.rlwy.net:20928"
+#define ONION_HARDCODED_MQTT_USERNAME "oniondao"
+#define ONION_HARDCODED_MQTT_PASSWORD "02eb3d5e04fd2dc9cbb6f3f5c6c9d89d9c96acd987cc24ddf9f717f9480e8786"
 
 #define TCA9534_ADDR   0x20
 #define TCA9534_INPUT  0x00
@@ -223,8 +225,8 @@ static void loadConfig() {
     g_config.serverBaseUrl = ONION_HARDCODED_SERVER_BASE_URL;
     g_config.badgeApiKey = prefString("api_key", ONION_DEFAULT_BADGE_API_KEY);
     g_config.mqttUri = ONION_HARDCODED_MQTT_URI;
-    g_config.mqttUsername = prefString("mqtt_user", ONION_DEFAULT_MQTT_USERNAME);
-    g_config.mqttPassword = prefString("mqtt_pass", ONION_DEFAULT_MQTT_PASSWORD);
+    g_config.mqttUsername = ONION_HARDCODED_MQTT_USERNAME;
+    g_config.mqttPassword = ONION_HARDCODED_MQTT_PASSWORD;
     g_config.mqttTopicPrefix = prefString("mqtt_prefix", ONION_DEFAULT_MQTT_TOPIC_PREFIX);
     g_config.scriptManifestUrl = prefString("script_url", ONION_DEFAULT_SCRIPT_MANIFEST_URL);
     g_identity.hardwareId = prefString("hw_id", "");
