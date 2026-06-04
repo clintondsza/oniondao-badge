@@ -127,6 +127,10 @@ Scripts receive a small global `onion` table:
 - `onion.hardware_id()` returns the badge hardware ID.
 - `onion.onion_id()` returns the current Onion ID, or `0` before handshake.
 - `onion.wallet()` returns the configured Solana public key, if any.
+- `onion.secure_random(count)` returns `count` random bytes (binary string)
+  from the ATECC608A hardware RNG. `count` is optional and defaults to `32`
+  (max `256`). Returns `nil` plus an error string if the secure element is
+  unavailable.
 - `onion.display_size()` returns `{ width = 264, height = 176 }` for the badge
   e-paper panel in landscape orientation.
 - `onion.clear_display()` clears the e-paper display and leaves Lua in control
@@ -163,6 +167,86 @@ Scripts receive a small global `onion` table:
 - `onion.espnow_receive(timeout_ms)` returns a packet table or `nil` on
   timeout. Packet fields are `mac`, `payload`, `message`, `len`, `rssi`, and
   `received_at`.
+- `onion.http_get(url, options)` performs an HTTPS GET (server certificates are
+  verified against the bundled root CAs) and returns `{ status, body }`, or
+  `nil` plus an error string. `options` is optional and may contain `headers`
+  (a table of header name → value), `content_type`, and `timeout_ms` (default
+  `10000`, max `30000`).
+- `onion.http_post(url, body, options)` performs an HTTPS POST. `body` is the
+  request body (defaults to `application/json`; override with
+  `options.content_type`). Same return shape and `options` as `http_get`.
+- `onion.mqtt_connected()` returns `true` when the badge's MQTT bridge is
+  connected.
+- `onion.mqtt_subscribe(topic, qos)` subscribes to a topic (with `+`/`#`
+  wildcards) so matching messages are delivered to `mqtt_receive()`. `qos` is
+  optional (default `1`). Returns `true`, or `nil` plus an error string.
+  Subscriptions are cleared when the script finishes.
+- `onion.mqtt_unsubscribe(topic)` removes a subscription.
+- `onion.mqtt_publish(topic, payload, qos, retain)` publishes a message. `qos`
+  (default `1`) and `retain` (default `false`) are optional. Returns `true`, or
+  `nil` plus an error string.
+- `onion.mqtt_receive(timeout_ms)` returns the next queued message table
+  (`topic`, `payload`, `message`, `len`, `received_at`) or `nil` on timeout
+  (max wait `30000` ms). Only messages matching an active `mqtt_subscribe()`
+  filter are queued.
+- `onion.mqtt_info()` returns `{ connected, uri, prefix, subscriptions,
+  queued }`.
+
+### Swappable modules (CC1101 Sub-GHz, Sound)
+
+The badge has two side-port module slots (see
+[`docs/MODULES.md`](../../../docs/MODULES.md)). The **CC1101 Sub-GHz radio** and
+the **Sound module** (NS4168 amplifier + SPH0641 PDM mic) land on the same five
+physical pins, so **only one may be active at a time** — call the matching
+`*_end()` before starting another. Both modules are power-gated on `GPIO18`,
+which `begin()` drives HIGH and `end()` releases.
+
+The pins differ per board variant (**L1**, **L2**, **R** — they differ only in
+which side port the module attaches to). Set the variant once over serial with
+`module <L1|L2|R>` (stored in NVS, default `L1`); every `begin()` uses it as the
+default. Individual pins can still be overridden in the `begin()` options table.
+
+CC1101 Sub-GHz:
+
+- `onion.subghz_begin(options)` powers and initialises the radio, returning
+  `true` or `nil` plus an error string (it also fails detection if no CC1101 is
+  present). `options` may set `freq` (MHz, default `433.92`), `modulation`
+  (`"gfsk"` default, `"ook"`/`"ask"`, `"2fsk"`, `"msk"`), and pin overrides
+  `sck`, `miso`, `mosi`, `cs`, `gdo0`, `power_pin`.
+- `onion.subghz_transmit(payload)` sends a 1–61 byte packet. Returns `true` or
+  `nil` plus an error string.
+- `onion.subghz_receive(timeout_ms)` returns a packet table (`payload`,
+  `message`, `len`, `rssi`, `rssi_dbm`) or `nil` on timeout (max `30000` ms).
+- `onion.subghz_set_frequency(mhz)` retunes the radio while running.
+- `onion.subghz_info()` returns `{ variant, active }`, plus `frequency`,
+  `version`, and `partnum` when the radio is running.
+- `onion.subghz_end()` powers the radio down.
+
+Sound — speaker (NS4168) and mic (SPH0641) are also mutually exclusive:
+
+- `onion.sound_speaker_begin(options)` starts I2S output. `options` may set
+  `sample_rate` (default `44100`) and pin overrides `bclk`, `ws`, `dout`,
+  `ctrl`, `power_pin`.
+- `onion.sound_play_tone(freq_hz, duration_ms, volume)` plays a sine tone.
+  `duration_ms` defaults to `200` (max `10000`); `volume` is `0.0`–`1.0`
+  (default `0.6`).
+- `onion.sound_play(pcm)` plays raw signed 16-bit little-endian mono PCM (capped
+  at 64 KB per call) and returns the number of bytes written.
+- `onion.sound_speaker_end()` stops the amplifier.
+- `onion.sound_mic_begin(options)` starts PDM capture. `options` may set
+  `sample_rate` (default `16000`) and pin overrides `clk`, `din`, `power_pin`.
+- `onion.sound_mic_read(num_samples)` returns up to `num_samples` (max `4096`)
+  of raw signed 16-bit PCM as a binary string.
+- `onion.sound_mic_level(duration_ms)` samples for `duration_ms` (max `1000`)
+  and returns `{ rms, peak, samples }` — handy for sound-activated scripts.
+- `onion.sound_mic_end()` stops the microphone.
+
+Modules left running are powered down automatically when the script finishes.
+
+HTTP and MQTT both require WiFi; `http_get`/`http_post` connect automatically,
+and the MQTT functions use the badge's shared MQTT bridge. Topics passed to the
+`mqtt_*` functions are absolute — they are not prefixed with the badge topic
+prefix. Queued MQTT payloads are capped at 512 bytes and topics at 128 bytes.
 
 Display option tables support `clear`, `font`, `color`, and `background`.
 Fonts are `"small"`, `"bold"`, and `"large"`. Colors are `"black"` and
@@ -265,6 +349,7 @@ Runtime serial commands are persisted in NVS:
 api-key <badge_api_key>
 mqtt-auth [username] [password] [prefix]
 scripts-url <manifest_url>
+module <L1|L2|R>
 wallet
 keygen confirm
 handshake

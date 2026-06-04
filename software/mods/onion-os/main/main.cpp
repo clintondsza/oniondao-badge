@@ -10,6 +10,8 @@
 #include <esp_random.h>
 #include <esp_wifi.h>
 #include <mqtt_client.h>
+#include <driver/i2s_std.h>
+#include <driver/i2s_pdm.h>
 #include <cJSON.h>
 #include <mbedtls/base64.h>
 #include <sodium.h>
@@ -28,6 +30,7 @@ extern "C" {
 #include <Fonts/FreeMonoBold18pt7b.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <string>
@@ -90,6 +93,24 @@ extern "C" {
 #define LUA_ESPNOW_RECV_MAX_MS 30000
 #define ONION_ESPNOW_MAX_PAYLOAD 240
 #define ONION_ESPNOW_QUEUE_LEN 8
+#define LUA_HTTP_MAX_TIMEOUT_MS 30000
+#define LUA_HTTP_DEFAULT_TIMEOUT_MS 10000
+#define LUA_MQTT_RECV_MAX_MS 30000
+#define ONION_LUA_MQTT_MAX_TOPIC 128
+#define ONION_LUA_MQTT_MAX_PAYLOAD 512
+#define ONION_LUA_MQTT_QUEUE_LEN 8
+#define ONION_LUA_MQTT_MAX_SUBS 8
+// Swappable side-port modules (see docs/MODULES.md). CC1101 and the Sound
+// module share the same physical pins, so only one may be active at a time.
+#define CC1101_XOSC_MHZ 26.0
+#define CC1101_SPI_HZ 4000000
+#define SUBGHZ_MAX_PACKET 61
+#define SUBGHZ_RX_MAX_MS 30000
+#define SOUND_SPK_SAMPLE_RATE 44100
+#define SOUND_MIC_SAMPLE_RATE 16000
+#define SOUND_TONE_MAX_MS 10000
+#define SOUND_PLAY_MAX_BYTES 65536
+#define SOUND_MIC_MAX_SAMPLES 4096
 #define ONION_DISPLAY_WIDTH 264
 #define ONION_DISPLAY_HEIGHT 176
 
@@ -125,6 +146,7 @@ struct RuntimeConfig {
     String mqttPassword;
     String mqttTopicPrefix;
     String scriptManifestUrl;
+    String moduleVariant;
 };
 
 struct BadgeIdentity {
@@ -221,6 +243,24 @@ static EspNowQueuedMessage g_espnowQueue[ONION_ESPNOW_QUEUE_LEN];
 static uint8_t g_espnowQueueHead = 0;
 static uint8_t g_espnowQueueCount = 0;
 
+struct MqttQueuedMessage {
+    char topic[ONION_LUA_MQTT_MAX_TOPIC + 1] = {};
+    char payload[ONION_LUA_MQTT_MAX_PAYLOAD + 1] = {};
+    uint16_t topicLen = 0;
+    uint16_t payloadLen = 0;
+    uint32_t receivedAt = 0;
+};
+
+// Topics a Lua script asked to receive, plus a ring buffer the MQTT task fills
+// and onion.mqtt_receive() drains. Guarded by g_luaMqttMux because the MQTT
+// client event handler runs on its own task.
+static portMUX_TYPE g_luaMqttMux = portMUX_INITIALIZER_UNLOCKED;
+static char g_luaMqttSubs[ONION_LUA_MQTT_MAX_SUBS][ONION_LUA_MQTT_MAX_TOPIC + 1];
+static uint8_t g_luaMqttSubCount = 0;
+static MqttQueuedMessage g_luaMqttQueue[ONION_LUA_MQTT_QUEUE_LEN];
+static uint8_t g_luaMqttQueueHead = 0;
+static uint8_t g_luaMqttQueueCount = 0;
+
 static String prefString(const char* key, const char* fallback) {
     String value = g_prefs.getString(key, "");
     return value.length() ? value : String(fallback);
@@ -258,6 +298,7 @@ static void loadConfig() {
     g_config.mqttPassword = ONION_HARDCODED_MQTT_PASSWORD;
     g_config.mqttTopicPrefix = prefString("mqtt_prefix", ONION_DEFAULT_MQTT_TOPIC_PREFIX);
     g_config.scriptManifestUrl = prefString("script_url", ONION_DEFAULT_SCRIPT_MANIFEST_URL);
+    g_config.moduleVariant = prefString("mod_variant", "L1");
     g_identity.hardwareId = prefString("hw_id", "");
     if (!g_identity.hardwareId.length()) {
         g_identity.hardwareId = generateHardwareId();
@@ -406,6 +447,46 @@ static bool ateccHmac(const std::vector<uint8_t>& message, uint8_t digest[32], S
         error = "ATECC HMAC failed " + String((int)status);
         return false;
     }
+    return true;
+}
+
+static bool ateccRandom(uint8_t* out, size_t count, String& error) {
+    if (count == 0) return true;
+
+    Wire.end();
+    delay(5);
+    atcab_release();
+
+    ATCA_IFACECFG_I2C_ADDRESS(&cfg_ateccx08a_i2c_default) = ATECC_I2C_ADDRESS_8BIT;
+    cfg_ateccx08a_i2c_default.atcai2c.bus = 0;
+    cfg_ateccx08a_i2c_default.atcai2c.baud = 100000;
+
+    ATCA_STATUS status = atcab_init(&cfg_ateccx08a_i2c_default);
+    if (status != ATCA_SUCCESS) {
+        error = "ATECC init failed " + String((int)status);
+        restartSharedI2cBus();
+        return false;
+    }
+
+    // atcab_random() returns 32 random bytes per call; loop to fill larger buffers.
+    size_t produced = 0;
+    while (produced < count) {
+        uint8_t block[32];
+        status = atcab_random(block);
+        if (status != ATCA_SUCCESS) {
+            error = "ATECC random failed " + String((int)status);
+            atcab_release();
+            restartSharedI2cBus();
+            return false;
+        }
+        size_t chunk = count - produced;
+        if (chunk > sizeof(block)) chunk = sizeof(block);
+        memcpy(out + produced, block, chunk);
+        produced += chunk;
+    }
+
+    atcab_release();
+    restartSharedI2cBus();
     return true;
 }
 
@@ -1033,6 +1114,91 @@ static void handleMqttPayload(const String& incomingTopic, const String& payload
     cJSON_Delete(root);
 }
 
+// Standard MQTT topic-filter matching with '+' (single level) and '#'
+// (multi-level, trailing) wildcards. Does not match a '#' filter against the
+// parent level (e.g. "a/#" does not match "a"), which is fine for Lua use.
+static bool mqttTopicMatches(const char* filter, const char* topic) {
+    if (*filter == '#') return true;
+    if (*filter == '+') {
+        const char* f = filter + 1;
+        const char* t = topic;
+        while (*t && *t != '/') t++;
+        if (*f == '\0') return *t == '\0';
+        if (*f != '/' || *t != '/') return false;
+        return mqttTopicMatches(f + 1, t + 1);
+    }
+    if (*topic == '\0') return *filter == '\0';
+    if (*filter != *topic) return false;
+    return mqttTopicMatches(filter + 1, topic + 1);
+}
+
+// Drop every Lua MQTT subscription/queued message and unsubscribe from the
+// broker. Called when a Lua script ends so a fresh script starts clean and the
+// bounded subscription list cannot leak across runs.
+static void luaMqttResetSubs() {
+    char subs[ONION_LUA_MQTT_MAX_SUBS][ONION_LUA_MQTT_MAX_TOPIC + 1];
+    uint8_t count;
+    portENTER_CRITICAL(&g_luaMqttMux);
+    count = g_luaMqttSubCount;
+    for (uint8_t i = 0; i < count; i++) strcpy(subs[i], g_luaMqttSubs[i]);
+    g_luaMqttSubCount = 0;
+    g_luaMqttQueueHead = 0;
+    g_luaMqttQueueCount = 0;
+    portEXIT_CRITICAL(&g_luaMqttMux);
+
+    if (g_mqtt && g_mqttConnected) {
+        for (uint8_t i = 0; i < count; i++) esp_mqtt_client_unsubscribe(g_mqtt, subs[i]);
+    }
+}
+
+static bool luaMqttQueuePop(MqttQueuedMessage& out) {
+    bool hasMessage = false;
+    portENTER_CRITICAL(&g_luaMqttMux);
+    if (g_luaMqttQueueCount > 0) {
+        out = g_luaMqttQueue[g_luaMqttQueueHead];
+        g_luaMqttQueueHead = (g_luaMqttQueueHead + 1) % ONION_LUA_MQTT_QUEUE_LEN;
+        g_luaMqttQueueCount--;
+        hasMessage = true;
+    }
+    portEXIT_CRITICAL(&g_luaMqttMux);
+    return hasMessage;
+}
+
+// Called from the MQTT task for every inbound message. Enqueues a copy only if
+// the topic matches a Lua subscription, dropping the oldest entry when full.
+static void luaMqttMaybeQueue(const char* topic, uint16_t topicLen, const char* payload, uint16_t payloadLen) {
+    if (topicLen > ONION_LUA_MQTT_MAX_TOPIC) return;
+    if (payloadLen > ONION_LUA_MQTT_MAX_PAYLOAD) payloadLen = ONION_LUA_MQTT_MAX_PAYLOAD;
+
+    char topicCopy[ONION_LUA_MQTT_MAX_TOPIC + 1];
+    memcpy(topicCopy, topic, topicLen);
+    topicCopy[topicLen] = '\0';
+
+    portENTER_CRITICAL(&g_luaMqttMux);
+    bool matched = false;
+    for (uint8_t i = 0; i < g_luaMqttSubCount; i++) {
+        if (mqttTopicMatches(g_luaMqttSubs[i], topicCopy)) { matched = true; break; }
+    }
+    if (matched) {
+        uint8_t slot = (g_luaMqttQueueHead + g_luaMqttQueueCount) % ONION_LUA_MQTT_QUEUE_LEN;
+        if (g_luaMqttQueueCount == ONION_LUA_MQTT_QUEUE_LEN) {
+            slot = g_luaMqttQueueHead;
+            g_luaMqttQueueHead = (g_luaMqttQueueHead + 1) % ONION_LUA_MQTT_QUEUE_LEN;
+        } else {
+            g_luaMqttQueueCount++;
+        }
+        MqttQueuedMessage& msg = g_luaMqttQueue[slot];
+        memcpy(msg.topic, topicCopy, topicLen);
+        msg.topic[topicLen] = '\0';
+        msg.topicLen = topicLen;
+        memcpy(msg.payload, payload, payloadLen);
+        msg.payload[payloadLen] = '\0';
+        msg.payloadLen = payloadLen;
+        msg.receivedAt = millis();
+    }
+    portEXIT_CRITICAL(&g_luaMqttMux);
+}
+
 static void mqttEventHandler(void*, esp_event_base_t, int32_t eventId, void* eventData) {
     esp_mqtt_event_handle_t event = (esp_mqtt_event_handle_t)eventData;
     switch ((esp_mqtt_event_id_t)eventId) {
@@ -1049,6 +1215,8 @@ static void mqttEventHandler(void*, esp_event_base_t, int32_t eventId, void* eve
     case MQTT_EVENT_DATA: {
         String incomingTopic(event->topic, event->topic_len);
         String payload(event->data, event->data_len);
+        luaMqttMaybeQueue(incomingTopic.c_str(), (uint16_t)incomingTopic.length(),
+                          payload.c_str(), (uint16_t)payload.length());
         handleMqttPayload(incomingTopic, payload);
         break;
     }
@@ -1850,6 +2018,722 @@ static bool luaConfigureInputGpio(lua_State* L, int pin, int modeArg) {
     return true;
 }
 
+// ===========================================================================
+// Swappable side-port modules (docs/MODULES.md): CC1101 Sub-GHz radio and the
+// Sound module (NS4168 I2S amp + SPH0641 PDM mic). Both modules land on the
+// same five physical pins, so only one may be active at a time. The pins differ
+// per board variant (L1/L2/R) selectable via NVS ("module <variant>") and
+// overridable per begin() call.
+// ===========================================================================
+
+struct ModuleVariantPins {
+    const char* name;
+    // [0]=MOSI/MicData [1]=CLK/BitClk [2]=CS/WS [3]=MISO/AudioOut [4]=GDO0/CTRL
+    int line[5];
+};
+
+static const ModuleVariantPins kModuleVariants[] = {
+    {"L1", {48, 47, 19, 42, 41}},
+    {"L2", {40, 41, 42, 19, 47}},
+    {"R",  {38, 39, 16, 15, 7}},
+};
+
+static const ModuleVariantPins& resolveModuleVariant() {
+    for (const ModuleVariantPins& v : kModuleVariants) {
+        if (g_config.moduleVariant.equalsIgnoreCase(v.name)) return v;
+    }
+    return kModuleVariants[0];
+}
+
+enum ActiveModule { MODULE_NONE, MODULE_SUBGHZ, MODULE_SOUND_SPK, MODULE_SOUND_MIC };
+static ActiveModule g_activeModule = MODULE_NONE;
+static int g_modulePowerPin = -1;
+
+// Asserts the peripheral power rail HIGH (PINOUT.md: GPIO18 enables module VCC).
+static void modulePowerOn(int powerPin) {
+    g_modulePowerPin = powerPin;
+    if (powerPin >= 0) {
+        pinMode(powerPin, OUTPUT);
+        digitalWrite(powerPin, HIGH);
+        delay(10);
+    }
+}
+
+static void modulePowerOff() {
+    if (g_modulePowerPin >= 0) {
+        digitalWrite(g_modulePowerPin, LOW);
+        g_modulePowerPin = -1;
+    }
+}
+
+// Reads an integer pin override from an options table, else returns fallback.
+static int luaModulePin(lua_State* L, int idx, const char* key, int fallback) {
+    if (idx) {
+        lua_getfield(L, idx, key);
+        if (lua_isnumber(L, -1)) {
+            int v = (int)lua_tointeger(L, -1);
+            lua_pop(L, 1);
+            return v;
+        }
+        lua_pop(L, 1);
+    }
+    return fallback;
+}
+
+// --- CC1101 Sub-GHz radio --------------------------------------------------
+
+#define CC1101_SRES     0x30
+#define CC1101_SRX      0x34
+#define CC1101_STX      0x35
+#define CC1101_SIDLE    0x36
+#define CC1101_SPWD     0x39
+#define CC1101_SFRX     0x3A
+#define CC1101_SFTX     0x3B
+#define CC1101_PARTNUM  0x30
+#define CC1101_VERSION  0x31
+#define CC1101_MARCSTATE 0x35
+#define CC1101_RXBYTES  0x3B
+#define CC1101_PATABLE  0x3E
+#define CC1101_FIFO     0x3F
+
+static SPIClass g_subghzSpi(HSPI);
+static int g_subghzCs = -1;
+static int g_subghzMiso = -1;
+static int g_subghzGdo0 = -1;
+static double g_subghzFreq = 0.0;
+
+static inline void cc1101Select() {
+    digitalWrite(g_subghzCs, LOW);
+    if (g_subghzMiso >= 0) {
+        uint32_t start = micros();
+        while (digitalRead(g_subghzMiso) && (micros() - start) < 5000) {}
+    }
+}
+
+static inline void cc1101Deselect() {
+    digitalWrite(g_subghzCs, HIGH);
+}
+
+static uint8_t cc1101Strobe(uint8_t cmd) {
+    g_subghzSpi.beginTransaction(SPISettings(CC1101_SPI_HZ, MSBFIRST, SPI_MODE0));
+    cc1101Select();
+    uint8_t status = g_subghzSpi.transfer(cmd);
+    cc1101Deselect();
+    g_subghzSpi.endTransaction();
+    return status;
+}
+
+static void cc1101WriteReg(uint8_t addr, uint8_t value) {
+    g_subghzSpi.beginTransaction(SPISettings(CC1101_SPI_HZ, MSBFIRST, SPI_MODE0));
+    cc1101Select();
+    g_subghzSpi.transfer(addr & 0x3F);
+    g_subghzSpi.transfer(value);
+    cc1101Deselect();
+    g_subghzSpi.endTransaction();
+}
+
+static uint8_t cc1101ReadReg(uint8_t addr) {
+    g_subghzSpi.beginTransaction(SPISettings(CC1101_SPI_HZ, MSBFIRST, SPI_MODE0));
+    cc1101Select();
+    g_subghzSpi.transfer((addr & 0x3F) | 0x80);
+    uint8_t value = g_subghzSpi.transfer(0x00);
+    cc1101Deselect();
+    g_subghzSpi.endTransaction();
+    return value;
+}
+
+// Status registers (0x30-0x3D) must be read with the burst bit set, otherwise
+// the same address byte is interpreted as a command strobe.
+static uint8_t cc1101ReadStatus(uint8_t addr) {
+    g_subghzSpi.beginTransaction(SPISettings(CC1101_SPI_HZ, MSBFIRST, SPI_MODE0));
+    cc1101Select();
+    g_subghzSpi.transfer((addr & 0x3F) | 0xC0);
+    uint8_t value = g_subghzSpi.transfer(0x00);
+    cc1101Deselect();
+    g_subghzSpi.endTransaction();
+    return value;
+}
+
+static void cc1101WriteBurst(uint8_t addr, const uint8_t* data, size_t len) {
+    g_subghzSpi.beginTransaction(SPISettings(CC1101_SPI_HZ, MSBFIRST, SPI_MODE0));
+    cc1101Select();
+    g_subghzSpi.transfer((addr & 0x3F) | 0x40);
+    for (size_t i = 0; i < len; i++) g_subghzSpi.transfer(data[i]);
+    cc1101Deselect();
+    g_subghzSpi.endTransaction();
+}
+
+static void cc1101ReadBurst(uint8_t addr, uint8_t* data, size_t len) {
+    g_subghzSpi.beginTransaction(SPISettings(CC1101_SPI_HZ, MSBFIRST, SPI_MODE0));
+    cc1101Select();
+    g_subghzSpi.transfer((addr & 0x3F) | 0xC0);
+    for (size_t i = 0; i < len; i++) data[i] = g_subghzSpi.transfer(0x00);
+    cc1101Deselect();
+    g_subghzSpi.endTransaction();
+}
+
+static void cc1101Reset() {
+    cc1101Deselect();
+    delayMicroseconds(5);
+    digitalWrite(g_subghzCs, LOW);
+    delayMicroseconds(10);
+    cc1101Deselect();
+    delayMicroseconds(45);
+    cc1101Strobe(CC1101_SRES);
+    delay(1);
+}
+
+// Common register block: variable-length packets, CRC on, GDO0 asserts while a
+// packet is being received. Modulation/frequency are layered on top.
+static void cc1101ApplyBaseConfig() {
+    static const uint8_t kBase[][2] = {
+        {0x02, 0x06}, {0x03, 0x47}, {0x04, 0xD3}, {0x05, 0x91}, {0x06, 0x3D},
+        {0x07, 0x04}, {0x08, 0x05}, {0x09, 0x00}, {0x0A, 0x00}, {0x0B, 0x06},
+        {0x0C, 0x00}, {0x10, 0xF6}, {0x11, 0x83}, {0x13, 0x22}, {0x14, 0xF8},
+        {0x16, 0x07}, {0x17, 0x30}, {0x18, 0x18}, {0x19, 0x16}, {0x1A, 0x6C},
+        {0x1B, 0x03}, {0x1C, 0x40}, {0x1D, 0x91}, {0x20, 0xFB}, {0x21, 0x56},
+        {0x23, 0xE9}, {0x24, 0x2A}, {0x25, 0x00}, {0x26, 0x1F}, {0x29, 0x59},
+        {0x2C, 0x81}, {0x2D, 0x35}, {0x2E, 0x09},
+    };
+    for (const auto& reg : kBase) cc1101WriteReg(reg[0], reg[1]);
+}
+
+static void cc1101SetModulation(const char* mod) {
+    uint8_t mdmcfg2 = 0x13; // GFSK + 30/32 sync (default)
+    uint8_t frend0 = 0x10;
+    uint8_t deviatn = 0x47;
+    bool ook = false;
+    if (mod) {
+        if (strcasecmp(mod, "ook") == 0 || strcasecmp(mod, "ask") == 0) {
+            mdmcfg2 = 0x33; frend0 = 0x11; ook = true;
+        } else if (strcasecmp(mod, "2fsk") == 0 || strcasecmp(mod, "fsk") == 0) {
+            mdmcfg2 = 0x03;
+        } else if (strcasecmp(mod, "msk") == 0) {
+            mdmcfg2 = 0x73;
+        }
+    }
+    cc1101WriteReg(0x12, mdmcfg2);
+    cc1101WriteReg(0x15, deviatn);
+    cc1101WriteReg(0x22, frend0);
+    if (ook) {
+        uint8_t pa[2] = {0x00, 0xC0}; // OOK: index0 = off, index1 = on
+        cc1101WriteBurst(CC1101_PATABLE, pa, 2);
+    } else {
+        uint8_t pa = 0xC0;
+        cc1101WriteBurst(CC1101_PATABLE, &pa, 1);
+    }
+}
+
+static void cc1101SetFrequency(double mhz) {
+    uint32_t freqWord = (uint32_t)((mhz * 65536.0) / CC1101_XOSC_MHZ + 0.5);
+    cc1101WriteReg(0x0D, (freqWord >> 16) & 0xFF);
+    cc1101WriteReg(0x0E, (freqWord >> 8) & 0xFF);
+    cc1101WriteReg(0x0F, freqWord & 0xFF);
+    g_subghzFreq = mhz;
+}
+
+static bool cc1101Transmit(const uint8_t* data, size_t len) {
+    if (len == 0 || len > SUBGHZ_MAX_PACKET) return false;
+    cc1101Strobe(CC1101_SIDLE);
+    cc1101Strobe(CC1101_SFTX);
+    uint8_t fifo[SUBGHZ_MAX_PACKET + 1];
+    fifo[0] = (uint8_t)len; // variable-length mode: first FIFO byte is length
+    memcpy(fifo + 1, data, len);
+    cc1101WriteBurst(CC1101_FIFO, fifo, len + 1);
+    cc1101Strobe(CC1101_STX);
+    uint32_t start = millis();
+    while (millis() - start < 1000) {
+        if ((cc1101ReadStatus(CC1101_MARCSTATE) & 0x1F) == 0x01) break; // back to IDLE
+        delay(1);
+    }
+    cc1101Strobe(CC1101_SFTX);
+    return true;
+}
+
+static int cc1101Receive(uint8_t* out, size_t maxLen, int* rssiRaw, uint32_t timeoutMs) {
+    cc1101Strobe(CC1101_SIDLE);
+    cc1101Strobe(CC1101_SFRX);
+    cc1101Strobe(CC1101_SRX);
+    uint32_t start = millis();
+    while ((uint32_t)(millis() - start) < timeoutMs) {
+        uint8_t rxBytes = cc1101ReadStatus(CC1101_RXBYTES);
+        if (rxBytes & 0x80) { // RX FIFO overflow
+            cc1101Strobe(CC1101_SIDLE);
+            cc1101Strobe(CC1101_SFRX);
+            cc1101Strobe(CC1101_SRX);
+            delay(2);
+            continue;
+        }
+        if ((rxBytes & 0x7F) > 0) {
+            uint8_t len = cc1101ReadReg(CC1101_FIFO);
+            if (len == 0 || len > maxLen) {
+                cc1101Strobe(CC1101_SIDLE);
+                cc1101Strobe(CC1101_SFRX);
+                cc1101Strobe(CC1101_SRX);
+                delay(2);
+                continue;
+            }
+            cc1101ReadBurst(CC1101_FIFO, out, len);
+            uint8_t status[2];
+            cc1101ReadBurst(CC1101_FIFO, status, 2); // appended RSSI + LQI/CRC
+            if (rssiRaw) *rssiRaw = status[0];
+            cc1101Strobe(CC1101_SIDLE);
+            cc1101Strobe(CC1101_SFRX);
+            return (int)len;
+        }
+        delay(2);
+    }
+    cc1101Strobe(CC1101_SIDLE);
+    cc1101Strobe(CC1101_SFRX);
+    return 0;
+}
+
+static bool subghzBegin(double freq, const char* mod, int sck, int miso, int mosi,
+                        int cs, int gdo0, int powerPin, String& error) {
+    if (g_activeModule != MODULE_NONE && g_activeModule != MODULE_SUBGHZ) {
+        error = "module busy; end it first";
+        return false;
+    }
+    modulePowerOn(powerPin);
+    g_subghzCs = cs;
+    g_subghzMiso = miso;
+    g_subghzGdo0 = gdo0;
+    pinMode(cs, OUTPUT);
+    digitalWrite(cs, HIGH);
+    if (gdo0 >= 0) pinMode(gdo0, INPUT);
+    g_subghzSpi.end();
+    g_subghzSpi.begin(sck, miso, mosi, -1);
+
+    cc1101Reset();
+    uint8_t version = cc1101ReadStatus(CC1101_VERSION);
+    if (version == 0x00 || version == 0xFF) {
+        error = "CC1101 not detected (version 0x" + String(version, HEX) + ")";
+        g_subghzSpi.end();
+        modulePowerOff();
+        g_activeModule = MODULE_NONE;
+        return false;
+    }
+    cc1101ApplyBaseConfig();
+    cc1101SetModulation(mod);
+    cc1101SetFrequency(freq);
+    cc1101Strobe(CC1101_SIDLE);
+    g_activeModule = MODULE_SUBGHZ;
+    return true;
+}
+
+static void subghzEnd() {
+    if (g_activeModule != MODULE_SUBGHZ) return;
+    cc1101Strobe(CC1101_SIDLE);
+    cc1101Strobe(CC1101_SPWD);
+    g_subghzSpi.end();
+    modulePowerOff();
+    g_activeModule = MODULE_NONE;
+}
+
+// --- Sound module: NS4168 amp (I2S std TX) + SPH0641 mic (PDM RX) -----------
+
+static i2s_chan_handle_t g_i2sTx = nullptr;
+static i2s_chan_handle_t g_i2sRx = nullptr;
+static int g_soundSampleRate = SOUND_SPK_SAMPLE_RATE;
+static int g_soundCtrlPin = -1;
+
+static void soundStop() {
+    if (g_i2sTx) {
+        i2s_channel_disable(g_i2sTx);
+        i2s_del_channel(g_i2sTx);
+        g_i2sTx = nullptr;
+    }
+    if (g_i2sRx) {
+        i2s_channel_disable(g_i2sRx);
+        i2s_del_channel(g_i2sRx);
+        g_i2sRx = nullptr;
+    }
+    if (g_soundCtrlPin >= 0) {
+        digitalWrite(g_soundCtrlPin, LOW);
+        g_soundCtrlPin = -1;
+    }
+    if (g_activeModule == MODULE_SOUND_SPK || g_activeModule == MODULE_SOUND_MIC) {
+        modulePowerOff();
+        g_activeModule = MODULE_NONE;
+    }
+}
+
+static bool soundSpeakerBegin(int bclk, int ws, int dout, int ctrl, int sampleRate,
+                              int powerPin, String& error) {
+    if (g_activeModule != MODULE_NONE) {
+        error = "module busy; end it first";
+        return false;
+    }
+    modulePowerOn(powerPin);
+    g_soundCtrlPin = ctrl;
+    if (ctrl >= 0) {
+        pinMode(ctrl, OUTPUT);
+        digitalWrite(ctrl, HIGH); // NS4168 CTRL high = amp enabled
+    }
+
+    i2s_chan_config_t chanCfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
+    if (i2s_new_channel(&chanCfg, &g_i2sTx, nullptr) != ESP_OK) {
+        error = "i2s alloc failed";
+        modulePowerOff();
+        return false;
+    }
+    i2s_std_config_t stdCfg = {
+        .clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG((uint32_t)sampleRate),
+        .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_MONO),
+        .gpio_cfg = {
+            .mclk = I2S_GPIO_UNUSED,
+            .bclk = (gpio_num_t)bclk,
+            .ws = (gpio_num_t)ws,
+            .dout = (gpio_num_t)dout,
+            .din = I2S_GPIO_UNUSED,
+            .invert_flags = {0, 0, 0},
+        },
+    };
+    if (i2s_channel_init_std_mode(g_i2sTx, &stdCfg) != ESP_OK) {
+        error = "i2s std init failed";
+        i2s_del_channel(g_i2sTx);
+        g_i2sTx = nullptr;
+        modulePowerOff();
+        return false;
+    }
+    i2s_channel_enable(g_i2sTx);
+    g_soundSampleRate = sampleRate;
+    g_activeModule = MODULE_SOUND_SPK;
+    return true;
+}
+
+static void soundPlayTone(double freq, int durationMs, double volume) {
+    const int sr = g_soundSampleRate;
+    int64_t total = (int64_t)sr * durationMs / 1000;
+    if (volume < 0) volume = 0;
+    if (volume > 1) volume = 1;
+    const double twoPi = 6.283185307179586;
+    double step = freq > 0 ? twoPi * freq / sr : 0.0;
+    double phase = 0.0;
+    int16_t buf[256];
+    int64_t produced = 0;
+    while (produced < total) {
+        int n = (int)((total - produced) > 256 ? 256 : (total - produced));
+        for (int i = 0; i < n; i++) {
+            buf[i] = (int16_t)(sin(phase) * 32000.0 * volume);
+            phase += step;
+            if (phase >= twoPi) phase -= twoPi;
+        }
+        size_t written = 0;
+        i2s_channel_write(g_i2sTx, buf, n * sizeof(int16_t), &written, 1000);
+        produced += n;
+    }
+}
+
+static bool soundMicBegin(int clk, int din, int sampleRate, int powerPin, String& error) {
+    if (g_activeModule != MODULE_NONE) {
+        error = "module busy; end it first";
+        return false;
+    }
+    modulePowerOn(powerPin);
+
+    i2s_chan_config_t chanCfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
+    if (i2s_new_channel(&chanCfg, nullptr, &g_i2sRx) != ESP_OK) {
+        error = "i2s alloc failed";
+        modulePowerOff();
+        return false;
+    }
+    i2s_pdm_rx_config_t pdmCfg = {
+        .clk_cfg = I2S_PDM_RX_CLK_DEFAULT_CONFIG((uint32_t)sampleRate),
+        .slot_cfg = I2S_PDM_RX_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_MONO),
+        .gpio_cfg = {
+            .clk = (gpio_num_t)clk,
+            .din = (gpio_num_t)din,
+            .invert_flags = {0},
+        },
+    };
+    if (i2s_channel_init_pdm_rx_mode(g_i2sRx, &pdmCfg) != ESP_OK) {
+        error = "i2s pdm init failed";
+        i2s_del_channel(g_i2sRx);
+        g_i2sRx = nullptr;
+        modulePowerOff();
+        return false;
+    }
+    i2s_channel_enable(g_i2sRx);
+    g_soundSampleRate = sampleRate;
+    g_activeModule = MODULE_SOUND_MIC;
+    return true;
+}
+
+// Powers down whichever module a script left running. Called when a Lua script
+// finishes so the radio/amp never stays energised between runs.
+static void moduleShutdownActive() {
+    if (g_activeModule == MODULE_SUBGHZ) subghzEnd();
+    else if (g_activeModule != MODULE_NONE) soundStop();
+}
+
+// --- Lua bindings ----------------------------------------------------------
+
+static int luaOnionSubghzBegin(lua_State* L) {
+    int opt = lua_istable(L, 1) ? 1 : 0;
+    const ModuleVariantPins& v = resolveModuleVariant();
+    double freq = 433.92;
+    const char* mod = "gfsk";
+    if (opt) {
+        lua_getfield(L, opt, "freq");
+        if (lua_isnumber(L, -1)) freq = lua_tonumber(L, -1);
+        lua_pop(L, 1);
+        lua_getfield(L, opt, "modulation");
+        if (lua_type(L, -1) == LUA_TSTRING) mod = lua_tostring(L, -1);
+        lua_pop(L, 1);
+    }
+    int mosi = luaModulePin(L, opt, "mosi", v.line[0]);
+    int sck = luaModulePin(L, opt, "sck", v.line[1]);
+    int cs = luaModulePin(L, opt, "cs", v.line[2]);
+    int miso = luaModulePin(L, opt, "miso", v.line[3]);
+    int gdo0 = luaModulePin(L, opt, "gdo0", v.line[4]);
+    int powerPin = luaModulePin(L, opt, "power_pin", PIN_PWR);
+
+    String error;
+    if (!subghzBegin(freq, mod, sck, miso, mosi, cs, gdo0, powerPin, error)) {
+        lua_pushnil(L);
+        lua_pushstring(L, error.c_str());
+        return 2;
+    }
+    lua_pushboolean(L, true);
+    return 1;
+}
+
+static int luaOnionSubghzTransmit(lua_State* L) {
+    if (g_activeModule != MODULE_SUBGHZ) {
+        lua_pushnil(L);
+        lua_pushstring(L, "subghz not started");
+        return 2;
+    }
+    size_t len = 0;
+    const char* data = luaL_checklstring(L, 1, &len);
+    if (len == 0 || len > SUBGHZ_MAX_PACKET) {
+        lua_pushnil(L);
+        lua_pushstring(L, "payload must be 1-61 bytes");
+        return 2;
+    }
+    if (!cc1101Transmit((const uint8_t*)data, len)) {
+        lua_pushnil(L);
+        lua_pushstring(L, "transmit failed");
+        return 2;
+    }
+    lua_pushboolean(L, true);
+    return 1;
+}
+
+static int luaOnionSubghzReceive(lua_State* L) {
+    if (g_activeModule != MODULE_SUBGHZ) {
+        lua_pushnil(L);
+        lua_pushstring(L, "subghz not started");
+        return 2;
+    }
+    uint32_t timeoutMs = (uint32_t)luaL_optinteger(L, 1, 0);
+    if (timeoutMs > SUBGHZ_RX_MAX_MS) timeoutMs = SUBGHZ_RX_MAX_MS;
+
+    uint8_t buf[SUBGHZ_MAX_PACKET];
+    int rssiRaw = 0;
+    int n = cc1101Receive(buf, sizeof(buf), &rssiRaw, timeoutMs);
+    if (n <= 0) {
+        lua_pushnil(L);
+        return 1;
+    }
+    int rssiDbm = (rssiRaw >= 128 ? (rssiRaw - 256) : rssiRaw) / 2 - 74;
+    lua_newtable(L);
+    lua_pushlstring(L, (const char*)buf, n);
+    lua_setfield(L, -2, "payload");
+    lua_pushlstring(L, (const char*)buf, n);
+    lua_setfield(L, -2, "message");
+    lua_pushinteger(L, n);
+    lua_setfield(L, -2, "len");
+    lua_pushinteger(L, rssiRaw);
+    lua_setfield(L, -2, "rssi");
+    lua_pushinteger(L, rssiDbm);
+    lua_setfield(L, -2, "rssi_dbm");
+    return 1;
+}
+
+static int luaOnionSubghzSetFrequency(lua_State* L) {
+    if (g_activeModule != MODULE_SUBGHZ) {
+        lua_pushnil(L);
+        lua_pushstring(L, "subghz not started");
+        return 2;
+    }
+    double mhz = luaL_checknumber(L, 1);
+    cc1101Strobe(CC1101_SIDLE);
+    cc1101SetFrequency(mhz);
+    lua_pushboolean(L, true);
+    return 1;
+}
+
+static int luaOnionSubghzInfo(lua_State* L) {
+    lua_newtable(L);
+    lua_pushstring(L, resolveModuleVariant().name);
+    lua_setfield(L, -2, "variant");
+    lua_pushboolean(L, g_activeModule == MODULE_SUBGHZ);
+    lua_setfield(L, -2, "active");
+    if (g_activeModule == MODULE_SUBGHZ) {
+        lua_pushnumber(L, g_subghzFreq);
+        lua_setfield(L, -2, "frequency");
+        lua_pushinteger(L, cc1101ReadStatus(CC1101_VERSION));
+        lua_setfield(L, -2, "version");
+        lua_pushinteger(L, cc1101ReadStatus(CC1101_PARTNUM));
+        lua_setfield(L, -2, "partnum");
+    }
+    return 1;
+}
+
+static int luaOnionSubghzEnd(lua_State* L) {
+    subghzEnd();
+    lua_pushboolean(L, true);
+    return 1;
+}
+
+static int luaOnionSoundSpeakerBegin(lua_State* L) {
+    int opt = lua_istable(L, 1) ? 1 : 0;
+    const ModuleVariantPins& v = resolveModuleVariant();
+    int bclk = luaModulePin(L, opt, "bclk", v.line[1]);
+    int ws = luaModulePin(L, opt, "ws", v.line[2]);
+    int dout = luaModulePin(L, opt, "dout", v.line[3]);
+    int ctrl = luaModulePin(L, opt, "ctrl", v.line[4]);
+    int powerPin = luaModulePin(L, opt, "power_pin", PIN_PWR);
+    int sampleRate = (int)luaModulePin(L, opt, "sample_rate", SOUND_SPK_SAMPLE_RATE);
+
+    String error;
+    if (!soundSpeakerBegin(bclk, ws, dout, ctrl, sampleRate, powerPin, error)) {
+        lua_pushnil(L);
+        lua_pushstring(L, error.c_str());
+        return 2;
+    }
+    lua_pushboolean(L, true);
+    return 1;
+}
+
+static int luaOnionSoundPlayTone(lua_State* L) {
+    if (g_activeModule != MODULE_SOUND_SPK) {
+        lua_pushnil(L);
+        lua_pushstring(L, "speaker not started");
+        return 2;
+    }
+    double freq = luaL_checknumber(L, 1);
+    int durationMs = (int)luaL_optinteger(L, 2, 200);
+    double volume = (double)luaL_optnumber(L, 3, 0.6);
+    if (durationMs < 0) durationMs = 0;
+    if (durationMs > SOUND_TONE_MAX_MS) durationMs = SOUND_TONE_MAX_MS;
+    soundPlayTone(freq, durationMs, volume);
+    lua_pushboolean(L, true);
+    return 1;
+}
+
+static int luaOnionSoundPlay(lua_State* L) {
+    if (g_activeModule != MODULE_SOUND_SPK) {
+        lua_pushnil(L);
+        lua_pushstring(L, "speaker not started");
+        return 2;
+    }
+    size_t len = 0;
+    const char* pcm = luaL_checklstring(L, 1, &len);
+    if (len > SOUND_PLAY_MAX_BYTES) len = SOUND_PLAY_MAX_BYTES;
+    size_t off = 0;
+    while (off < len) {
+        size_t written = 0;
+        if (i2s_channel_write(g_i2sTx, pcm + off, len - off, &written, 1000) != ESP_OK) break;
+        if (written == 0) break;
+        off += written;
+    }
+    lua_pushinteger(L, (lua_Integer)off);
+    return 1;
+}
+
+static int luaOnionSoundSpeakerEnd(lua_State* L) {
+    if (g_activeModule == MODULE_SOUND_SPK) soundStop();
+    lua_pushboolean(L, true);
+    return 1;
+}
+
+static int luaOnionSoundMicBegin(lua_State* L) {
+    int opt = lua_istable(L, 1) ? 1 : 0;
+    const ModuleVariantPins& v = resolveModuleVariant();
+    int clk = luaModulePin(L, opt, "clk", v.line[1]);
+    int din = luaModulePin(L, opt, "din", v.line[0]);
+    int powerPin = luaModulePin(L, opt, "power_pin", PIN_PWR);
+    int sampleRate = (int)luaModulePin(L, opt, "sample_rate", SOUND_MIC_SAMPLE_RATE);
+
+    String error;
+    if (!soundMicBegin(clk, din, sampleRate, powerPin, error)) {
+        lua_pushnil(L);
+        lua_pushstring(L, error.c_str());
+        return 2;
+    }
+    lua_pushboolean(L, true);
+    return 1;
+}
+
+static int luaOnionSoundMicRead(lua_State* L) {
+    if (g_activeModule != MODULE_SOUND_MIC) {
+        lua_pushnil(L);
+        lua_pushstring(L, "mic not started");
+        return 2;
+    }
+    int numSamples = (int)luaL_optinteger(L, 1, 256);
+    if (numSamples < 1) numSamples = 1;
+    if (numSamples > SOUND_MIC_MAX_SAMPLES) numSamples = SOUND_MIC_MAX_SAMPLES;
+    static int16_t buf[SOUND_MIC_MAX_SAMPLES];
+    size_t bytesRead = 0;
+    if (i2s_channel_read(g_i2sRx, buf, numSamples * sizeof(int16_t), &bytesRead, 1000) != ESP_OK) {
+        lua_pushnil(L);
+        lua_pushstring(L, "mic read failed");
+        return 2;
+    }
+    lua_pushlstring(L, (const char*)buf, bytesRead);
+    return 1;
+}
+
+static int luaOnionSoundMicLevel(lua_State* L) {
+    if (g_activeModule != MODULE_SOUND_MIC) {
+        lua_pushnil(L);
+        lua_pushstring(L, "mic not started");
+        return 2;
+    }
+    int durationMs = (int)luaL_optinteger(L, 1, 100);
+    if (durationMs < 1) durationMs = 1;
+    if (durationMs > 1000) durationMs = 1000;
+    int wantSamples = g_soundSampleRate * durationMs / 1000;
+    static int16_t buf[512];
+    double sumSq = 0.0;
+    int counted = 0;
+    int peak = 0;
+    while (counted < wantSamples) {
+        int n = wantSamples - counted;
+        if (n > 512) n = 512;
+        size_t bytesRead = 0;
+        if (i2s_channel_read(g_i2sRx, buf, n * sizeof(int16_t), &bytesRead, 1000) != ESP_OK) break;
+        int got = (int)(bytesRead / sizeof(int16_t));
+        if (got == 0) break;
+        for (int i = 0; i < got; i++) {
+            int s = buf[i];
+            sumSq += (double)s * s;
+            int a = s < 0 ? -s : s;
+            if (a > peak) peak = a;
+        }
+        counted += got;
+    }
+    double rms = counted ? sqrt(sumSq / counted) : 0.0;
+    lua_newtable(L);
+    lua_pushnumber(L, rms);
+    lua_setfield(L, -2, "rms");
+    lua_pushinteger(L, peak);
+    lua_setfield(L, -2, "peak");
+    lua_pushinteger(L, counted);
+    lua_setfield(L, -2, "samples");
+    return 1;
+}
+
+static int luaOnionSoundMicEnd(lua_State* L) {
+    if (g_activeModule == MODULE_SOUND_MIC) soundStop();
+    lua_pushboolean(L, true);
+    return 1;
+}
+
 static int luaOnionLog(lua_State* L) {
     const char* message = luaL_checkstring(L, 1);
     setLog("Lua: " + String(message));
@@ -1868,6 +2752,264 @@ static int luaOnionOnionId(lua_State* L) {
 
 static int luaOnionWallet(lua_State* L) {
     lua_pushstring(L, g_identity.solanaPublicKey.c_str());
+    return 1;
+}
+
+// onion.secure_random([count]) -> string of `count` random bytes from the
+// ATECC608A hardware RNG (default 32, max 256). Returns nil + error on failure.
+static int luaOnionSecureRandom(lua_State* L) {
+    lua_Integer count = luaL_optinteger(L, 1, 32);
+    if (count < 1) count = 1;
+    if (count > 256) count = 256;
+
+    uint8_t buf[256];
+    String error;
+    if (!ateccRandom(buf, (size_t)count, error)) {
+        lua_pushnil(L);
+        lua_pushstring(L, error.c_str());
+        return 2;
+    }
+
+    lua_pushlstring(L, reinterpret_cast<const char*>(buf), (size_t)count);
+    return 1;
+}
+
+// Shared worker for onion.http_get / onion.http_post. `optionsIdx` is the Lua
+// stack index of an options table ({ headers = {...}, content_type = ...,
+// timeout_ms = ... }) or 0 when none was passed. On success returns one table
+// { status, body }; on failure returns nil plus an error string.
+static int luaHttpDo(lua_State* L, esp_http_client_method_t method, const char* url,
+                     const char* body, size_t bodyLen, int optionsIdx) {
+    if (!ensureWifi()) {
+        lua_pushnil(L);
+        lua_pushstring(L, "wifi unavailable");
+        return 2;
+    }
+
+    String responseBuffer;
+    esp_http_client_config_t cfg = {};
+    cfg.url = url;
+    cfg.timeout_ms = LUA_HTTP_DEFAULT_TIMEOUT_MS;
+    cfg.crt_bundle_attach = esp_crt_bundle_attach;
+    cfg.event_handler = httpCaptureEvent;
+    cfg.user_data = &responseBuffer;
+
+    const char* contentType = "application/json";
+    if (optionsIdx) {
+        lua_getfield(L, optionsIdx, "timeout_ms");
+        if (lua_isnumber(L, -1)) {
+            int t = (int)lua_tointeger(L, -1);
+            if (t > 0) cfg.timeout_ms = t > LUA_HTTP_MAX_TIMEOUT_MS ? LUA_HTTP_MAX_TIMEOUT_MS : t;
+        }
+        lua_pop(L, 1);
+        lua_getfield(L, optionsIdx, "content_type");
+        if (lua_type(L, -1) == LUA_TSTRING) contentType = lua_tostring(L, -1);
+        lua_pop(L, 1);
+    }
+
+    esp_http_client_handle_t client = esp_http_client_init(&cfg);
+    if (!client) {
+        lua_pushnil(L);
+        lua_pushstring(L, "http init failed");
+        return 2;
+    }
+
+    esp_http_client_set_method(client, method);
+    if (body) {
+        esp_http_client_set_header(client, "Content-Type", contentType);
+        esp_http_client_set_post_field(client, body, bodyLen);
+    }
+
+    if (optionsIdx) {
+        lua_getfield(L, optionsIdx, "headers");
+        if (lua_istable(L, -1)) {
+            int headersTable = lua_gettop(L);
+            lua_pushnil(L);
+            while (lua_next(L, headersTable) != 0) {
+                if (lua_type(L, -2) == LUA_TSTRING && lua_type(L, -1) == LUA_TSTRING) {
+                    esp_http_client_set_header(client, lua_tostring(L, -2), lua_tostring(L, -1));
+                }
+                lua_pop(L, 1);
+            }
+        }
+        lua_pop(L, 1);
+    }
+
+    esp_err_t err = esp_http_client_perform(client);
+    int code = err == ESP_OK ? esp_http_client_get_status_code(client) : -1;
+    esp_http_client_cleanup(client);
+
+    if (err != ESP_OK) {
+        lua_pushnil(L);
+        lua_pushstring(L, esp_err_to_name(err));
+        return 2;
+    }
+
+    lua_newtable(L);
+    lua_pushinteger(L, code);
+    lua_setfield(L, -2, "status");
+    lua_pushlstring(L, responseBuffer.c_str(), responseBuffer.length());
+    lua_setfield(L, -2, "body");
+    return 1;
+}
+
+// onion.http_get(url [, options]) -> { status, body } | nil, err
+static int luaOnionHttpGet(lua_State* L) {
+    const char* url = luaL_checkstring(L, 1);
+    int optionsIdx = lua_istable(L, 2) ? 2 : 0;
+    return luaHttpDo(L, HTTP_METHOD_GET, url, nullptr, 0, optionsIdx);
+}
+
+// onion.http_post(url, body [, options]) -> { status, body } | nil, err
+static int luaOnionHttpPost(lua_State* L) {
+    const char* url = luaL_checkstring(L, 1);
+    size_t bodyLen = 0;
+    const char* body = luaL_optlstring(L, 2, "", &bodyLen);
+    int optionsIdx = lua_istable(L, 3) ? 3 : 0;
+    return luaHttpDo(L, HTTP_METHOD_POST, url, body, bodyLen, optionsIdx);
+}
+
+// onion.mqtt_connected() -> bool
+static int luaOnionMqttConnected(lua_State* L) {
+    lua_pushboolean(L, g_mqttConnected);
+    return 1;
+}
+
+// onion.mqtt_subscribe(topic [, qos]) -> true | nil, err
+static int luaOnionMqttSubscribe(lua_State* L) {
+    const char* sub = luaL_checkstring(L, 1);
+    int qos = (int)luaL_optinteger(L, 2, 1);
+    if (qos < 0) qos = 0;
+    if (qos > 2) qos = 2;
+    if (strlen(sub) > ONION_LUA_MQTT_MAX_TOPIC) {
+        lua_pushnil(L);
+        lua_pushstring(L, "topic too long");
+        return 2;
+    }
+
+    ensureMqtt();
+    if (!g_mqtt || !g_mqttConnected) {
+        lua_pushnil(L);
+        lua_pushstring(L, "mqtt not connected");
+        return 2;
+    }
+
+    if (esp_mqtt_client_subscribe(g_mqtt, sub, qos) < 0) {
+        lua_pushnil(L);
+        lua_pushstring(L, "subscribe failed");
+        return 2;
+    }
+
+    // Track the filter so inbound matches are queued for onion.mqtt_receive().
+    portENTER_CRITICAL(&g_luaMqttMux);
+    bool known = false;
+    for (uint8_t i = 0; i < g_luaMqttSubCount; i++) {
+        if (strcmp(g_luaMqttSubs[i], sub) == 0) { known = true; break; }
+    }
+    if (!known && g_luaMqttSubCount < ONION_LUA_MQTT_MAX_SUBS) {
+        strncpy(g_luaMqttSubs[g_luaMqttSubCount], sub, ONION_LUA_MQTT_MAX_TOPIC);
+        g_luaMqttSubs[g_luaMqttSubCount][ONION_LUA_MQTT_MAX_TOPIC] = '\0';
+        g_luaMqttSubCount++;
+    }
+    portEXIT_CRITICAL(&g_luaMqttMux);
+
+    lua_pushboolean(L, true);
+    return 1;
+}
+
+// onion.mqtt_unsubscribe(topic) -> true | nil, err
+static int luaOnionMqttUnsubscribe(lua_State* L) {
+    const char* sub = luaL_checkstring(L, 1);
+    if (g_mqtt && g_mqttConnected) esp_mqtt_client_unsubscribe(g_mqtt, sub);
+
+    portENTER_CRITICAL(&g_luaMqttMux);
+    for (uint8_t i = 0; i < g_luaMqttSubCount; i++) {
+        if (strcmp(g_luaMqttSubs[i], sub) == 0) {
+            for (uint8_t j = i + 1; j < g_luaMqttSubCount; j++) {
+                strcpy(g_luaMqttSubs[j - 1], g_luaMqttSubs[j]);
+            }
+            g_luaMqttSubCount--;
+            break;
+        }
+    }
+    portEXIT_CRITICAL(&g_luaMqttMux);
+
+    lua_pushboolean(L, true);
+    return 1;
+}
+
+// onion.mqtt_publish(topic, payload [, qos [, retain]]) -> true | nil, err
+static int luaOnionMqttPublish(lua_State* L) {
+    const char* mqttTopic = luaL_checkstring(L, 1);
+    size_t payloadLen = 0;
+    const char* payload = luaL_checklstring(L, 2, &payloadLen);
+    int qos = (int)luaL_optinteger(L, 3, 1);
+    if (qos < 0) qos = 0;
+    if (qos > 2) qos = 2;
+    int retain = lua_toboolean(L, 4) ? 1 : 0;
+
+    ensureMqtt();
+    if (!g_mqtt || !g_mqttConnected) {
+        lua_pushnil(L);
+        lua_pushstring(L, "mqtt not connected");
+        return 2;
+    }
+
+    if (esp_mqtt_client_publish(g_mqtt, mqttTopic, payload, (int)payloadLen, qos, retain) < 0) {
+        lua_pushnil(L);
+        lua_pushstring(L, "publish failed");
+        return 2;
+    }
+    lua_pushboolean(L, true);
+    return 1;
+}
+
+// onion.mqtt_receive([timeout_ms]) -> { topic, payload, message, len, received_at } | nil
+static int luaOnionMqttReceive(lua_State* L) {
+    uint32_t timeoutMs = (uint32_t)luaL_optinteger(L, 1, 0);
+    if (timeoutMs > LUA_MQTT_RECV_MAX_MS) timeoutMs = LUA_MQTT_RECV_MAX_MS;
+
+    uint32_t start = millis();
+    MqttQueuedMessage msg;
+    while (!luaMqttQueuePop(msg)) {
+        if ((uint32_t)(millis() - start) >= timeoutMs) {
+            lua_pushnil(L);
+            return 1;
+        }
+        delay(10);
+    }
+
+    lua_newtable(L);
+    lua_pushlstring(L, msg.topic, msg.topicLen);
+    lua_setfield(L, -2, "topic");
+    lua_pushlstring(L, msg.payload, msg.payloadLen);
+    lua_setfield(L, -2, "payload");
+    lua_pushlstring(L, msg.payload, msg.payloadLen);
+    lua_setfield(L, -2, "message");
+    lua_pushinteger(L, msg.payloadLen);
+    lua_setfield(L, -2, "len");
+    lua_pushinteger(L, (lua_Integer)msg.receivedAt);
+    lua_setfield(L, -2, "received_at");
+    return 1;
+}
+
+// onion.mqtt_info() -> { connected, uri, prefix, subscriptions, queued }
+static int luaOnionMqttInfo(lua_State* L) {
+    lua_newtable(L);
+    lua_pushboolean(L, g_mqttConnected);
+    lua_setfield(L, -2, "connected");
+    lua_pushstring(L, g_config.mqttUri.c_str());
+    lua_setfield(L, -2, "uri");
+    lua_pushstring(L, (g_config.mqttTopicPrefix.length() ? g_config.mqttTopicPrefix : String("oniondao")).c_str());
+    lua_setfield(L, -2, "prefix");
+    portENTER_CRITICAL(&g_luaMqttMux);
+    uint8_t subCount = g_luaMqttSubCount;
+    uint8_t queued = g_luaMqttQueueCount;
+    portEXIT_CRITICAL(&g_luaMqttMux);
+    lua_pushinteger(L, subCount);
+    lua_setfield(L, -2, "subscriptions");
+    lua_pushinteger(L, queued);
+    lua_setfield(L, -2, "queued");
     return 1;
 }
 
@@ -2273,6 +3415,52 @@ static void registerOnionLua(lua_State* L) {
     lua_setfield(L, -2, "onion_id");
     lua_pushcfunction(L, luaOnionWallet);
     lua_setfield(L, -2, "wallet");
+    lua_pushcfunction(L, luaOnionSecureRandom);
+    lua_setfield(L, -2, "secure_random");
+    lua_pushcfunction(L, luaOnionHttpGet);
+    lua_setfield(L, -2, "http_get");
+    lua_pushcfunction(L, luaOnionHttpPost);
+    lua_setfield(L, -2, "http_post");
+    lua_pushcfunction(L, luaOnionMqttConnected);
+    lua_setfield(L, -2, "mqtt_connected");
+    lua_pushcfunction(L, luaOnionMqttSubscribe);
+    lua_setfield(L, -2, "mqtt_subscribe");
+    lua_pushcfunction(L, luaOnionMqttUnsubscribe);
+    lua_setfield(L, -2, "mqtt_unsubscribe");
+    lua_pushcfunction(L, luaOnionMqttPublish);
+    lua_setfield(L, -2, "mqtt_publish");
+    lua_pushcfunction(L, luaOnionMqttReceive);
+    lua_setfield(L, -2, "mqtt_receive");
+    lua_pushcfunction(L, luaOnionMqttInfo);
+    lua_setfield(L, -2, "mqtt_info");
+    lua_pushcfunction(L, luaOnionSubghzBegin);
+    lua_setfield(L, -2, "subghz_begin");
+    lua_pushcfunction(L, luaOnionSubghzTransmit);
+    lua_setfield(L, -2, "subghz_transmit");
+    lua_pushcfunction(L, luaOnionSubghzReceive);
+    lua_setfield(L, -2, "subghz_receive");
+    lua_pushcfunction(L, luaOnionSubghzSetFrequency);
+    lua_setfield(L, -2, "subghz_set_frequency");
+    lua_pushcfunction(L, luaOnionSubghzInfo);
+    lua_setfield(L, -2, "subghz_info");
+    lua_pushcfunction(L, luaOnionSubghzEnd);
+    lua_setfield(L, -2, "subghz_end");
+    lua_pushcfunction(L, luaOnionSoundSpeakerBegin);
+    lua_setfield(L, -2, "sound_speaker_begin");
+    lua_pushcfunction(L, luaOnionSoundPlayTone);
+    lua_setfield(L, -2, "sound_play_tone");
+    lua_pushcfunction(L, luaOnionSoundPlay);
+    lua_setfield(L, -2, "sound_play");
+    lua_pushcfunction(L, luaOnionSoundSpeakerEnd);
+    lua_setfield(L, -2, "sound_speaker_end");
+    lua_pushcfunction(L, luaOnionSoundMicBegin);
+    lua_setfield(L, -2, "sound_mic_begin");
+    lua_pushcfunction(L, luaOnionSoundMicRead);
+    lua_setfield(L, -2, "sound_mic_read");
+    lua_pushcfunction(L, luaOnionSoundMicLevel);
+    lua_setfield(L, -2, "sound_mic_level");
+    lua_pushcfunction(L, luaOnionSoundMicEnd);
+    lua_setfield(L, -2, "sound_mic_end");
     lua_pushcfunction(L, luaOnionDisplaySize);
     lua_setfield(L, -2, "display_size");
     lua_pushcfunction(L, luaOnionClearDisplay);
@@ -2331,11 +3519,15 @@ static bool runLuaSource(const String& source, const String& name) {
     if (status != LUA_OK) {
         String err = lua_tostring(L, -1);
         lua_close(L);
+        luaMqttResetSubs();
+        moduleShutdownActive();
         setLog("Lua error: " + clipped(err, 22));
         return false;
     }
 
     lua_close(L);
+    luaMqttResetSubs();
+    moduleShutdownActive();
     if (g_luaDisplayActive) {
         Serial.printf("[onion-os] Lua ran %s\n", name.c_str());
     } else {
@@ -2546,6 +3738,7 @@ static void printHelp() {
     Serial.println("  api-key <badge_api_key>");
     Serial.println("  mqtt-auth [username] [password] [prefix]");
     Serial.println("  scripts-url <manifest_url>");
+    Serial.println("  module <L1|L2|R>");
     Serial.println("  wallet");
     Serial.println("  keygen confirm");
     Serial.println("  handshake");
@@ -2626,6 +3819,16 @@ static void handleSerial() {
             g_config.scriptManifestUrl = args[1];
             saveConfigValue("script_url", g_config.scriptManifestUrl);
             setLog("Script URL saved");
+        } else if (args[0] == "module" && args.size() >= 2) {
+            String variant = args[1];
+            variant.toUpperCase();
+            if (variant == "L1" || variant == "L2" || variant == "R") {
+                g_config.moduleVariant = variant;
+                saveConfigValue("mod_variant", variant);
+                setLog("Module variant " + variant);
+            } else {
+                setLog("Variant must be L1, L2, or R");
+            }
         } else if (args[0] == "wallet") {
             String keyError;
             if (loadOrCreateSolanaKey(false, keyError)) {
@@ -2668,6 +3871,7 @@ static void handleSerial() {
             Serial.printf("wifi=%s\n", g_config.wifiSsid.c_str());
             Serial.printf("server=%s\n", g_config.serverBaseUrl.c_str());
             Serial.printf("mqtt=%s\n", g_config.mqttUri.c_str());
+            Serial.printf("module=%s\n", g_config.moduleVariant.c_str());
         } else {
             printHelp();
         }
