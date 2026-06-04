@@ -6,18 +6,18 @@ TARGET="esp32s3"
 BAUD="${BAUD:-460800}"
 PORT="${PORT:-}"
 MONITOR=0
-ERASE=0
 
 usage() {
   cat <<'EOF'
 Usage: scripts/build-flash.sh [options]
 
 Build Onion OS and flash it to the first available ESP32-S3 serial board.
+This performs an app update only. It does not erase flash, preserving NVS data
+such as the wrapped Solana wallet seed.
 
 Options:
   -p, --port PORT    Flash a specific serial port instead of auto-detecting
   -b, --baud BAUD    Flash baud rate (default: 460800, or $BAUD)
-  --erase            Erase flash before flashing
   --monitor          Open idf.py monitor after flashing
   -h, --help         Show this help
 
@@ -41,8 +41,9 @@ while [[ $# -gt 0 ]]; do
       shift 2
       ;;
     --erase)
-      ERASE=1
-      shift
+      echo "Refusing to erase flash: Onion OS stores the wrapped Solana wallet seed in NVS." >&2
+      echo "Use idf.py erase-flash manually only when you intentionally want to delete badge state." >&2
+      exit 2
       ;;
     --monitor)
       MONITOR=1
@@ -187,10 +188,6 @@ if [[ ! -f sdkconfig ]] || ! grep -q '^CONFIG_IDF_TARGET="esp32s3"$' sdkconfig; 
 fi
 
 idf.py build
-
-if [[ "$ERASE" -eq 1 ]]; then
-  idf.py -p "$PORT" -b "$BAUD" erase-flash
-fi
 
 if [[ "$MONITOR" -eq 1 ]]; then
   idf.py -p "$PORT" -b "$BAUD" flash monitor

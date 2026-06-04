@@ -23,6 +23,16 @@ else.
 Example Lua scripts in this directory are meant to be copied into the Onion OS
 script registry or served through the script manifest.
 
+## E-paper Demo
+
+`eink-demo.lua` exercises the Onion SDK e-paper helpers by drawing text, a
+border, and a separator line.
+
+## ESP-NOW Beacon
+
+`espnow-beacon.lua` enables ESP-NOW, broadcasts a short badge identity packet,
+and displays the first received packet if another badge replies.
+
 ## Image Browser
 
 `image-browser.lua` browses every downloaded image stored in SPIFFS as
@@ -40,6 +50,14 @@ To install it through a manifest, serve this script and the image assets:
 ```json
 {
   "scripts": [
+    {
+      "name": "eink-demo.lua",
+      "url": "https://example.com/eink-demo.lua"
+    },
+    {
+      "name": "espnow-beacon.lua",
+      "url": "https://example.com/espnow-beacon.lua"
+    },
     {
       "name": "image-browser.lua",
       "url": "https://example.com/image-browser.lua"

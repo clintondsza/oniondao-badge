@@ -4,9 +4,11 @@
 #include <Preferences.h>
 #include <WiFi.h>
 #include <Wire.h>
+#include <esp_now.h>
 #include <esp_crt_bundle.h>
 #include <esp_http_client.h>
 #include <esp_random.h>
+#include <esp_wifi.h>
 #include <mqtt_client.h>
 #include <cJSON.h>
 #include <mbedtls/base64.h>
@@ -85,10 +87,16 @@ extern "C" {
 #define SOLANA_KEY_MAC_LEN crypto_aead_xchacha20poly1305_ietf_ABYTES
 #define LUA_GPIO_POLL_MAX_MS 30000
 #define LUA_SLEEP_MAX_MS 60000
+#define LUA_ESPNOW_RECV_MAX_MS 30000
+#define ONION_ESPNOW_MAX_PAYLOAD 240
+#define ONION_ESPNOW_QUEUE_LEN 8
+#define ONION_DISPLAY_WIDTH 264
+#define ONION_DISPLAY_HEIGHT 176
 
 GxEPD2_BW<GxEPD2_270_GDEY027T91, GxEPD2_270_GDEY027T91::HEIGHT> display(
     GxEPD2_270_GDEY027T91(PIN_EPD_CS, PIN_EPD_DC, PIN_EPD_RST, PIN_EPD_BUSY)
 );
+static GFXcanvas1 g_luaCanvas(ONION_DISPLAY_WIDTH, ONION_DISPLAY_HEIGHT);
 
 enum Screen : uint8_t {
     SCREEN_BOOT_SPLASH,
@@ -186,6 +194,14 @@ struct LuaButton {
     uint8_t mask;
 };
 
+struct EspNowQueuedMessage {
+    uint8_t mac[6] = {};
+    uint8_t len = 0;
+    char payload[ONION_ESPNOW_MAX_PAYLOAD + 1] = {};
+    int8_t rssi = 0;
+    uint32_t receivedAt = 0;
+};
+
 static const LuaButton kLuaButtons[] = {
     {"left", BTN_LEFT},
     {"down", BTN_DOWN},
@@ -194,6 +210,16 @@ static const LuaButton kLuaButtons[] = {
     {"select", BTN_SELECT},
     {"cancel", BTN_CANCEL},
 };
+
+static const uint8_t kEspNowBroadcastMac[6] = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
+
+static bool g_espnowStarted = false;
+static uint32_t g_espnowSent = 0;
+static uint32_t g_espnowReceived = 0;
+static portMUX_TYPE g_espnowMux = portMUX_INITIALIZER_UNLOCKED;
+static EspNowQueuedMessage g_espnowQueue[ONION_ESPNOW_QUEUE_LEN];
+static uint8_t g_espnowQueueHead = 0;
+static uint8_t g_espnowQueueCount = 0;
 
 static String prefString(const char* key, const char* fallback) {
     String value = g_prefs.getString(key, "");
@@ -1606,15 +1632,193 @@ static bool loadStoredBitmap(const String& name, LoadedBitmap& bitmap, String& e
     return false;
 }
 
-static void renderBitmap(const LoadedBitmap& bitmap, int x, int y, bool clearScreen) {
+static uint16_t canvasColor(uint16_t displayColor) {
+    return displayColor == GxEPD_BLACK ? 1 : 0;
+}
+
+static void refreshLuaCanvas() {
     display.setFullWindow();
     display.firstPage();
     do {
-        if (clearScreen) display.fillScreen(GxEPD_WHITE);
-        display.drawBitmap(x, y, bitmap.bits.data(), bitmap.width, bitmap.height, GxEPD_BLACK);
+        display.fillScreen(GxEPD_WHITE);
+        display.drawBitmap(0, 0, g_luaCanvas.getBuffer(), g_luaCanvas.width(), g_luaCanvas.height(), GxEPD_BLACK);
     } while (display.nextPage());
     g_luaDisplayActive = true;
     g_needsRedraw = false;
+}
+
+static void renderBitmap(const LoadedBitmap& bitmap, int x, int y, bool clearScreen) {
+    if (clearScreen) g_luaCanvas.fillScreen(0);
+    g_luaCanvas.drawBitmap(x, y, bitmap.bits.data(), bitmap.width, bitmap.height, 1);
+    refreshLuaCanvas();
+}
+
+static bool luaTableBool(lua_State* L, int index, const char* key, bool fallback) {
+    if (!lua_istable(L, index)) return fallback;
+    lua_getfield(L, index, key);
+    bool value = lua_isnil(L, -1) ? fallback : lua_toboolean(L, -1);
+    lua_pop(L, 1);
+    return value;
+}
+
+static int luaTableInt(lua_State* L, int index, const char* key, int fallback) {
+    if (!lua_istable(L, index)) return fallback;
+    lua_getfield(L, index, key);
+    int value = lua_isnumber(L, -1) ? (int)lua_tointeger(L, -1) : fallback;
+    lua_pop(L, 1);
+    return value;
+}
+
+static const char* luaTableString(lua_State* L, int index, const char* key, const char* fallback) {
+    if (!lua_istable(L, index)) return fallback;
+    lua_getfield(L, index, key);
+    const char* value = lua_isstring(L, -1) ? lua_tostring(L, -1) : fallback;
+    lua_pop(L, 1);
+    return value;
+}
+
+static uint16_t displayColorFromName(const char* value, uint16_t fallback) {
+    if (!value) return fallback;
+    if (strcmp(value, "white") == 0 || strcmp(value, "bg") == 0 || strcmp(value, "background") == 0) {
+        return GxEPD_WHITE;
+    }
+    return GxEPD_BLACK;
+}
+
+static const GFXfont* displayFontFromName(const char* value) {
+    if (!value || strcmp(value, "small") == 0 || strcmp(value, "regular") == 0) return &FreeMono9pt7b;
+    if (strcmp(value, "bold") == 0) return &FreeMonoBold9pt7b;
+    if (strcmp(value, "large") == 0 || strcmp(value, "title") == 0) return &FreeMonoBold18pt7b;
+    return &FreeMono9pt7b;
+}
+
+static bool luaDisplayClearArg(lua_State* L, int index, bool fallback = true) {
+    if (lua_gettop(L) < index) return fallback;
+    if (lua_istable(L, index)) return luaTableBool(L, index, "clear", fallback);
+    return lua_toboolean(L, index);
+}
+
+static String macToString(const uint8_t mac[6]) {
+    char buf[18];
+    snprintf(buf, sizeof(buf), "%02x:%02x:%02x:%02x:%02x:%02x",
+        mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    return String(buf);
+}
+
+static bool parseMacString(const char* value, uint8_t mac[6]) {
+    if (!value) return false;
+    unsigned int parts[6];
+    if (sscanf(value, "%x:%x:%x:%x:%x:%x",
+        &parts[0], &parts[1], &parts[2], &parts[3], &parts[4], &parts[5]) != 6) {
+        return false;
+    }
+    for (int i = 0; i < 6; ++i) {
+        if (parts[i] > 0xff) return false;
+        mac[i] = (uint8_t)parts[i];
+    }
+    return true;
+}
+
+static bool espnowQueuePop(EspNowQueuedMessage& out) {
+    bool hasMessage = false;
+    portENTER_CRITICAL(&g_espnowMux);
+    if (g_espnowQueueCount > 0) {
+        out = g_espnowQueue[g_espnowQueueHead];
+        g_espnowQueueHead = (g_espnowQueueHead + 1) % ONION_ESPNOW_QUEUE_LEN;
+        g_espnowQueueCount--;
+        hasMessage = true;
+    }
+    portEXIT_CRITICAL(&g_espnowMux);
+    return hasMessage;
+}
+
+static void espnowQueuePush(const uint8_t mac[6], const uint8_t* data, int len, int8_t rssi) {
+    if (!mac || !data || len <= 0) return;
+    if (len > ONION_ESPNOW_MAX_PAYLOAD) len = ONION_ESPNOW_MAX_PAYLOAD;
+
+    portENTER_CRITICAL(&g_espnowMux);
+    uint8_t slot = (g_espnowQueueHead + g_espnowQueueCount) % ONION_ESPNOW_QUEUE_LEN;
+    if (g_espnowQueueCount == ONION_ESPNOW_QUEUE_LEN) {
+        slot = g_espnowQueueHead;
+        g_espnowQueueHead = (g_espnowQueueHead + 1) % ONION_ESPNOW_QUEUE_LEN;
+    } else {
+        g_espnowQueueCount++;
+    }
+
+    EspNowQueuedMessage& msg = g_espnowQueue[slot];
+    memcpy(msg.mac, mac, sizeof(msg.mac));
+    msg.len = (uint8_t)len;
+    memcpy(msg.payload, data, len);
+    msg.payload[len] = '\0';
+    msg.rssi = rssi;
+    msg.receivedAt = millis();
+    g_espnowReceived++;
+    portEXIT_CRITICAL(&g_espnowMux);
+}
+
+static void onEspNowReceive(const esp_now_recv_info_t* info, const uint8_t* data, int len) {
+    int8_t rssi = 0;
+    if (info && info->rx_ctrl) rssi = info->rx_ctrl->rssi;
+    if (info && info->src_addr) espnowQueuePush(info->src_addr, data, len, rssi);
+}
+
+static void onEspNowSend(const esp_now_send_info_t*, esp_now_send_status_t status) {
+    if (status == ESP_NOW_SEND_SUCCESS) g_espnowSent++;
+}
+
+static bool espnowAddPeer(const uint8_t mac[6], uint8_t channel, String& error) {
+    if (esp_now_is_peer_exist(mac)) return true;
+
+    esp_now_peer_info_t peer = {};
+    memcpy(peer.peer_addr, mac, 6);
+    peer.channel = channel;
+    peer.ifidx = WIFI_IF_STA;
+    peer.encrypt = false;
+    esp_err_t rc = esp_now_add_peer(&peer);
+    if (rc != ESP_OK) {
+        error = "ESP-NOW add peer failed " + String((int)rc);
+        return false;
+    }
+    return true;
+}
+
+static bool ensureEspNow(int requestedChannel, String& error) {
+    if (requestedChannel < 0 || requestedChannel > 14) {
+        error = "Bad ESP-NOW channel";
+        return false;
+    }
+
+    WiFi.mode(WIFI_STA);
+
+    uint8_t primary = 0;
+    wifi_second_chan_t second = WIFI_SECOND_CHAN_NONE;
+    esp_wifi_get_channel(&primary, &second);
+    if (requestedChannel > 0 && WiFi.status() == WL_CONNECTED && requestedChannel != primary) {
+        error = "WiFi connected; ESP-NOW uses AP channel " + String(primary);
+        return false;
+    }
+    if (requestedChannel > 0 && WiFi.status() != WL_CONNECTED) {
+        esp_wifi_set_promiscuous(true);
+        esp_err_t channelRc = esp_wifi_set_channel((uint8_t)requestedChannel, WIFI_SECOND_CHAN_NONE);
+        esp_wifi_set_promiscuous(false);
+        if (channelRc != ESP_OK) {
+            error = "ESP-NOW channel failed " + String((int)channelRc);
+            return false;
+        }
+    }
+
+    if (!g_espnowStarted) {
+        esp_err_t rc = esp_now_init();
+        if (rc != ESP_OK) {
+            error = "ESP-NOW init failed " + String((int)rc);
+            return false;
+        }
+        esp_now_register_recv_cb(onEspNowReceive);
+        esp_now_register_send_cb(onEspNowSend);
+        g_espnowStarted = true;
+    }
+
+    return espnowAddPeer(kEspNowBroadcastMac, 0, error);
 }
 
 static bool luaCanReadGpio(int pin) {
@@ -1667,20 +1871,132 @@ static int luaOnionWallet(lua_State* L) {
     return 1;
 }
 
+static int luaOnionDisplaySize(lua_State* L) {
+    lua_newtable(L);
+    lua_pushinteger(L, display.width());
+    lua_setfield(L, -2, "width");
+    lua_pushinteger(L, display.height());
+    lua_setfield(L, -2, "height");
+    return 1;
+}
+
 static int luaOnionClearDisplay(lua_State*) {
-    display.setFullWindow();
-    display.firstPage();
-    do {
-        display.fillScreen(GxEPD_WHITE);
-    } while (display.nextPage());
-    g_luaDisplayActive = true;
-    g_needsRedraw = false;
+    g_luaCanvas.fillScreen(0);
+    refreshLuaCanvas();
     return 0;
 }
 
 static int luaOnionReleaseDisplay(lua_State*) {
     g_luaDisplayActive = false;
     g_needsRedraw = true;
+    return 0;
+}
+
+static int luaOnionDisplayText(lua_State* L) {
+    const char* text = luaL_checkstring(L, 1);
+    int x = (int)luaL_optinteger(L, 2, 6);
+    int y = (int)luaL_optinteger(L, 3, 22);
+    bool clearScreen = luaDisplayClearArg(L, 4, true);
+    const GFXfont* font = &FreeMono9pt7b;
+    uint16_t color = GxEPD_BLACK;
+    uint16_t bg = GxEPD_WHITE;
+
+    if (lua_istable(L, 4)) {
+        font = displayFontFromName(luaTableString(L, 4, "font", "small"));
+        color = displayColorFromName(luaTableString(L, 4, "color", "black"), GxEPD_BLACK);
+        bg = displayColorFromName(luaTableString(L, 4, "background", "white"), GxEPD_WHITE);
+    } else if (lua_gettop(L) >= 5) {
+        font = displayFontFromName(luaL_optstring(L, 5, "small"));
+    }
+
+    if (clearScreen) g_luaCanvas.fillScreen(canvasColor(bg));
+    g_luaCanvas.setFont(font);
+    g_luaCanvas.setTextColor(canvasColor(color));
+    g_luaCanvas.setCursor(x, y);
+    g_luaCanvas.print(text);
+    refreshLuaCanvas();
+    return 0;
+}
+
+static int luaOnionDisplayLines(lua_State* L) {
+    int x = (int)luaL_optinteger(L, 2, 6);
+    int y = (int)luaL_optinteger(L, 3, 22);
+    int lineHeight = (int)luaL_optinteger(L, 4, 18);
+    bool clearScreen = luaDisplayClearArg(L, 5, true);
+    const GFXfont* font = &FreeMono9pt7b;
+    uint16_t color = GxEPD_BLACK;
+    uint16_t bg = GxEPD_WHITE;
+    if (lua_istable(L, 5)) {
+        font = displayFontFromName(luaTableString(L, 5, "font", "small"));
+        color = displayColorFromName(luaTableString(L, 5, "color", "black"), GxEPD_BLACK);
+        bg = displayColorFromName(luaTableString(L, 5, "background", "white"), GxEPD_WHITE);
+        lineHeight = luaTableInt(L, 5, "line_height", lineHeight);
+    }
+    if (lineHeight < 8) lineHeight = 8;
+    if (lineHeight > 64) lineHeight = 64;
+
+    if (clearScreen) g_luaCanvas.fillScreen(canvasColor(bg));
+    g_luaCanvas.setFont(font);
+    g_luaCanvas.setTextColor(canvasColor(color));
+    if (lua_istable(L, 1)) {
+        int count = (int)lua_rawlen(L, 1);
+        for (int i = 1; i <= count; ++i) {
+            lua_rawgeti(L, 1, i);
+            const char* line = lua_tostring(L, -1);
+            if (line) {
+                g_luaCanvas.setCursor(x, y + (i - 1) * lineHeight);
+                g_luaCanvas.print(line);
+            }
+            lua_pop(L, 1);
+        }
+    } else {
+        String text = luaL_checkstring(L, 1);
+        int line = 0;
+        int start = 0;
+        while (start <= (int)text.length()) {
+            int end = text.indexOf('\n', start);
+            if (end < 0) end = text.length();
+            g_luaCanvas.setCursor(x, y + line * lineHeight);
+            g_luaCanvas.print(text.substring(start, end));
+            if (end == (int)text.length()) break;
+            start = end + 1;
+            line++;
+        }
+    }
+    refreshLuaCanvas();
+    return 0;
+}
+
+static int luaOnionDisplayLine(lua_State* L) {
+    int x0 = (int)luaL_checkinteger(L, 1);
+    int y0 = (int)luaL_checkinteger(L, 2);
+    int x1 = (int)luaL_checkinteger(L, 3);
+    int y1 = (int)luaL_checkinteger(L, 4);
+    bool clearScreen = luaDisplayClearArg(L, 5, false);
+    uint16_t color = GxEPD_BLACK;
+    if (lua_istable(L, 5)) color = displayColorFromName(luaTableString(L, 5, "color", "black"), GxEPD_BLACK);
+
+    if (clearScreen) g_luaCanvas.fillScreen(0);
+    g_luaCanvas.drawLine(x0, y0, x1, y1, canvasColor(color));
+    refreshLuaCanvas();
+    return 0;
+}
+
+static int luaOnionDisplayRect(lua_State* L) {
+    int x = (int)luaL_checkinteger(L, 1);
+    int y = (int)luaL_checkinteger(L, 2);
+    int w = (int)luaL_checkinteger(L, 3);
+    int h = (int)luaL_checkinteger(L, 4);
+    bool clearScreen = luaDisplayClearArg(L, 5, false);
+    bool fill = lua_istable(L, 5) ? luaTableBool(L, 5, "fill", false) : false;
+    uint16_t color = lua_istable(L, 5)
+        ? displayColorFromName(luaTableString(L, 5, "color", "black"), GxEPD_BLACK)
+        : GxEPD_BLACK;
+
+    if (clearScreen) g_luaCanvas.fillScreen(0);
+    if (fill) g_luaCanvas.fillRect(x, y, w, h, canvasColor(color));
+    else g_luaCanvas.drawRect(x, y, w, h, canvasColor(color));
+    refreshLuaCanvas();
     return 0;
 }
 
@@ -1811,6 +2127,142 @@ static int luaOnionGpioPoll(lua_State* L) {
     return 3;
 }
 
+static int luaOnionEspNowStart(lua_State* L) {
+    int channel = (int)luaL_optinteger(L, 1, 0);
+    String error;
+    if (!ensureEspNow(channel, error)) {
+        lua_pushboolean(L, false);
+        lua_pushstring(L, error.c_str());
+        return 2;
+    }
+    setLog("ESP-NOW ready");
+    lua_pushboolean(L, true);
+    return 1;
+}
+
+static int luaOnionEspNowStop(lua_State* L) {
+    if (g_espnowStarted) {
+        esp_now_unregister_recv_cb();
+        esp_now_unregister_send_cb();
+        esp_now_deinit();
+        g_espnowStarted = false;
+    }
+    portENTER_CRITICAL(&g_espnowMux);
+    g_espnowQueueHead = 0;
+    g_espnowQueueCount = 0;
+    portEXIT_CRITICAL(&g_espnowMux);
+    lua_pushboolean(L, true);
+    return 1;
+}
+
+static int luaOnionEspNowMac(lua_State* L) {
+    uint8_t mac[6] = {};
+    esp_wifi_get_mac(WIFI_IF_STA, mac);
+    String macText = macToString(mac);
+    lua_pushstring(L, macText.c_str());
+    return 1;
+}
+
+static int luaOnionEspNowInfo(lua_State* L) {
+    uint8_t mac[6] = {};
+    uint8_t channel = 0;
+    wifi_second_chan_t second = WIFI_SECOND_CHAN_NONE;
+    esp_wifi_get_mac(WIFI_IF_STA, mac);
+    esp_wifi_get_channel(&channel, &second);
+
+    lua_newtable(L);
+    lua_pushboolean(L, g_espnowStarted);
+    lua_setfield(L, -2, "started");
+    String macText = macToString(mac);
+    lua_pushstring(L, macText.c_str());
+    lua_setfield(L, -2, "mac");
+    lua_pushinteger(L, channel);
+    lua_setfield(L, -2, "channel");
+    lua_pushinteger(L, (lua_Integer)g_espnowSent);
+    lua_setfield(L, -2, "sent");
+    lua_pushinteger(L, (lua_Integer)g_espnowReceived);
+    lua_setfield(L, -2, "received");
+    portENTER_CRITICAL(&g_espnowMux);
+    lua_pushinteger(L, g_espnowQueueCount);
+    portEXIT_CRITICAL(&g_espnowMux);
+    lua_setfield(L, -2, "queued");
+    return 1;
+}
+
+static int luaOnionEspNowSend(lua_State* L) {
+    size_t len = 0;
+    const char* payload = luaL_checklstring(L, 1, &len);
+    if (len == 0 || len > ONION_ESPNOW_MAX_PAYLOAD) {
+        lua_pushboolean(L, false);
+        lua_pushfstring(L, "ESP-NOW payload must be 1-%d bytes", ONION_ESPNOW_MAX_PAYLOAD);
+        return 2;
+    }
+
+    uint8_t mac[6];
+    memcpy(mac, kEspNowBroadcastMac, sizeof(mac));
+    if (lua_gettop(L) >= 2 && !lua_isnil(L, 2)) {
+        if (!parseMacString(luaL_checkstring(L, 2), mac)) {
+            lua_pushboolean(L, false);
+            lua_pushstring(L, "Bad ESP-NOW MAC");
+            return 2;
+        }
+    }
+
+    String error;
+    if (!ensureEspNow(0, error) || !espnowAddPeer(mac, 0, error)) {
+        lua_pushboolean(L, false);
+        lua_pushstring(L, error.c_str());
+        return 2;
+    }
+
+    esp_err_t rc = esp_now_send(mac, reinterpret_cast<const uint8_t*>(payload), len);
+    if (rc != ESP_OK) {
+        lua_pushboolean(L, false);
+        lua_pushfstring(L, "ESP-NOW send failed %d", (int)rc);
+        return 2;
+    }
+    lua_pushboolean(L, true);
+    return 1;
+}
+
+static int luaOnionEspNowReceive(lua_State* L) {
+    uint32_t timeoutMs = (uint32_t)luaL_optinteger(L, 1, 0);
+    if (timeoutMs > LUA_ESPNOW_RECV_MAX_MS) timeoutMs = LUA_ESPNOW_RECV_MAX_MS;
+
+    String error;
+    if (!ensureEspNow(0, error)) {
+        lua_pushnil(L);
+        lua_pushstring(L, error.c_str());
+        return 2;
+    }
+
+    uint32_t start = millis();
+    EspNowQueuedMessage msg;
+    while (!espnowQueuePop(msg)) {
+        if ((uint32_t)(millis() - start) >= timeoutMs) {
+            lua_pushnil(L);
+            return 1;
+        }
+        delay(10);
+    }
+
+    lua_newtable(L);
+    String macText = macToString(msg.mac);
+    lua_pushstring(L, macText.c_str());
+    lua_setfield(L, -2, "mac");
+    lua_pushlstring(L, msg.payload, msg.len);
+    lua_setfield(L, -2, "payload");
+    lua_pushlstring(L, msg.payload, msg.len);
+    lua_setfield(L, -2, "message");
+    lua_pushinteger(L, msg.len);
+    lua_setfield(L, -2, "len");
+    lua_pushinteger(L, msg.rssi);
+    lua_setfield(L, -2, "rssi");
+    lua_pushinteger(L, (lua_Integer)msg.receivedAt);
+    lua_setfield(L, -2, "received_at");
+    return 1;
+}
+
 static void registerOnionLua(lua_State* L) {
     lua_newtable(L);
     lua_pushcfunction(L, luaOnionLog);
@@ -1821,10 +2273,20 @@ static void registerOnionLua(lua_State* L) {
     lua_setfield(L, -2, "onion_id");
     lua_pushcfunction(L, luaOnionWallet);
     lua_setfield(L, -2, "wallet");
+    lua_pushcfunction(L, luaOnionDisplaySize);
+    lua_setfield(L, -2, "display_size");
     lua_pushcfunction(L, luaOnionClearDisplay);
     lua_setfield(L, -2, "clear_display");
     lua_pushcfunction(L, luaOnionReleaseDisplay);
     lua_setfield(L, -2, "release_display");
+    lua_pushcfunction(L, luaOnionDisplayText);
+    lua_setfield(L, -2, "display_text");
+    lua_pushcfunction(L, luaOnionDisplayLines);
+    lua_setfield(L, -2, "display_lines");
+    lua_pushcfunction(L, luaOnionDisplayLine);
+    lua_setfield(L, -2, "display_line");
+    lua_pushcfunction(L, luaOnionDisplayRect);
+    lua_setfield(L, -2, "display_rect");
     lua_pushcfunction(L, luaOnionDisplayBitmap);
     lua_setfield(L, -2, "display_bitmap");
     lua_pushcfunction(L, luaOnionImages);
@@ -1839,6 +2301,18 @@ static void registerOnionLua(lua_State* L) {
     lua_setfield(L, -2, "gpio_read");
     lua_pushcfunction(L, luaOnionGpioPoll);
     lua_setfield(L, -2, "gpio_poll");
+    lua_pushcfunction(L, luaOnionEspNowStart);
+    lua_setfield(L, -2, "espnow_start");
+    lua_pushcfunction(L, luaOnionEspNowStop);
+    lua_setfield(L, -2, "espnow_stop");
+    lua_pushcfunction(L, luaOnionEspNowMac);
+    lua_setfield(L, -2, "espnow_mac");
+    lua_pushcfunction(L, luaOnionEspNowInfo);
+    lua_setfield(L, -2, "espnow_info");
+    lua_pushcfunction(L, luaOnionEspNowSend);
+    lua_setfield(L, -2, "espnow_send");
+    lua_pushcfunction(L, luaOnionEspNowReceive);
+    lua_setfield(L, -2, "espnow_receive");
     lua_setglobal(L, "onion");
 }
 

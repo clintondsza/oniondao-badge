@@ -60,6 +60,43 @@ The CryptoAuthLib defaults are pinned for the badge hardware:
 - ATECC address: `0xC0` 8-bit (`0x60` 7-bit)
 - I2C speed: 100 kHz
 
+## Updating Without Losing the Solana Key
+
+The wrapped Solana wallet seed is stored in the `nvs` flash partition, not in
+the Onion OS app partition. A normal firmware update preserves the key, cached
+wallet address, hardware ID, link state, API key, MQTT settings, and script
+manifest URL. A full flash erase deletes that state.
+
+For normal updates, flash only the app:
+
+```sh
+idf.py -p /dev/cu.usbserial-10 flash
+```
+
+Or use the helper script, which does not erase flash:
+
+```sh
+scripts/build-flash.sh --port /dev/cu.usbserial-10
+scripts/build-flash.sh --port /dev/cu.usbserial-10 --monitor
+```
+
+Do not run these commands on a badge whose wallet should be kept:
+
+```sh
+idf.py erase-flash
+esptool.py erase_flash
+```
+
+Before a high-risk update, you can back up the NVS partition:
+
+```sh
+esptool.py --chip esp32s3 --port /dev/cu.usbserial-10 read_flash 0x9000 0x5000 onion-os-nvs-backup.bin
+```
+
+That backup is badge-specific because the wallet seed is wrapped with a key
+derived from the badge's ATECC608B HMAC slot. Restoring it to another badge will
+not make the wallet usable.
+
 ## Lua Scripts
 
 The firmware downloads a JSON script manifest, stores scripts in SPIFFS, and can
@@ -90,10 +127,20 @@ Scripts receive a small global `onion` table:
 - `onion.hardware_id()` returns the badge hardware ID.
 - `onion.onion_id()` returns the current Onion ID, or `0` before handshake.
 - `onion.wallet()` returns the configured Solana public key, if any.
+- `onion.display_size()` returns `{ width = 264, height = 176 }` for the badge
+  e-paper panel in landscape orientation.
 - `onion.clear_display()` clears the e-paper display and leaves Lua in control
   of the screen until the next button press.
 - `onion.release_display()` returns screen ownership to Onion OS after a Lua
   script has drawn to the display.
+- `onion.display_text(text, x, y, clear_or_options, font)` draws one text line.
+  `x` defaults to `6`, `y` defaults to `22`, and clear defaults to true.
+- `onion.display_lines(lines, x, y, line_height, clear_or_options)` draws a
+  Lua table or newline-delimited string in one e-paper refresh.
+- `onion.display_line(x0, y0, x1, y1, clear_or_options)` draws a black or white
+  line. Clear defaults to false.
+- `onion.display_rect(x, y, w, h, clear_or_options)` draws a rectangle. Pass
+  `{ fill = true }` to fill it. Clear defaults to false.
 - `onion.display_bitmap(name, x, y, clear)` draws a downloaded PBM or BMP image
   asset. Pass `-1` for `x` or `y` to center that axis. `clear` defaults to true.
 - `onion.images()` returns a table of downloaded PBM and BMP image asset names.
@@ -105,10 +152,30 @@ Scripts receive a small global `onion` table:
 - `onion.gpio_poll(pin, target, timeout_ms, interval_ms, mode)` polls an
   expansion GPIO until it equals `target`, returning `matched, value,
   elapsed_ms`.
+- `onion.espnow_start(channel)` enables ESP-NOW. `channel` is optional; with
+  WiFi connected, ESP-NOW uses the current AP channel.
+- `onion.espnow_stop()` deinitializes ESP-NOW and clears queued packets.
+- `onion.espnow_mac()` returns the badge WiFi station MAC address.
+- `onion.espnow_info()` returns `{ started, mac, channel, sent, received,
+  queued }`.
+- `onion.espnow_send(payload, mac)` sends a 1-240 byte payload. `mac` is
+  optional and defaults to broadcast (`ff:ff:ff:ff:ff:ff`).
+- `onion.espnow_receive(timeout_ms)` returns a packet table or `nil` on
+  timeout. Packet fields are `mac`, `payload`, `message`, `len`, `rssi`, and
+  `received_at`.
+
+Display option tables support `clear`, `font`, `color`, and `background`.
+Fonts are `"small"`, `"bold"`, and `"large"`. Colors are `"black"` and
+`"white"`.
 
 GPIO `mode` is optional and may be `"input"`, `"floating"`, `"pullup"`, `"up"`,
 `"pulldown"`, or `"down"`. Lua scripts can read the side-port GPIOs only:
 `48, 47, 19, 42, 41, 40, 38, 39, 16, 15, 7, 6, 5, 4`.
+
+ESP-NOW and the Onion OS WiFi/MQTT bridge share the ESP32-S3 station radio. If
+the badge is already connected to WiFi, pass no channel to `espnow_start()` and
+run nearby badges on the same AP channel. If WiFi is not connected, scripts may
+pass a channel from `1` to `14`.
 
 Expected manifest shape:
 
@@ -144,6 +211,37 @@ Example Lua image script:
 ```lua
 local ok, err = onion.display_bitmap("poster.pbm", -1, -1)
 if not ok then onion.log(err) end
+```
+
+Example Lua e-paper script:
+
+```lua
+onion.display_lines({
+  "Onion SDK",
+  "E-paper ready",
+  onion.espnow_mac()
+}, 8, 28, 22, { font = "bold", clear = true })
+onion.display_rect(4, 8, 256, 160, { clear = false })
+```
+
+Example Lua ESP-NOW script:
+
+```lua
+local ok, err = onion.espnow_start()
+if not ok then
+  onion.log(err)
+  return
+end
+
+onion.espnow_send("hello from " .. onion.hardware_id())
+local msg = onion.espnow_receive(5000)
+if msg then
+  onion.display_lines({
+    "ESP-NOW RX",
+    msg.mac,
+    msg.message
+  }, 8, 28, 20, true)
+end
 ```
 
 Local example scripts live in [`scripts/`](scripts/). `image-browser.lua`
@@ -208,6 +306,8 @@ scripts/build-flash.sh --monitor
 ```
 
 Pass `--port /dev/cu.usbserial-10` if you want to flash a specific port.
+The helper script refuses full flash erase so NVS-backed badge state is not
+deleted accidentally.
 Set `IDF_EXPORT=/path/to/esp-idf/export.sh` if your ESP-IDF install is not in a
 common location.
 
