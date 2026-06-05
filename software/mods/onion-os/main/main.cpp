@@ -1434,6 +1434,7 @@ static void subscribeBadgeTopics() {
 
 static void handleLinkRequest(cJSON* root) {
     g_luaDisplayActive = false;
+    g_forceFullRefresh = true;
     g_linkPrompt.requestId = jsonString(root, "requestId");
     g_linkPrompt.username = jsonString(root, "username");
     g_linkPrompt.active = true;
@@ -1443,6 +1444,7 @@ static void handleLinkRequest(cJSON* root) {
 
 static void handleTransactionRequest(cJSON* root) {
     g_luaDisplayActive = false;
+    g_forceFullRefresh = true;
     g_txPrompt.operationId = jsonString(root, "operationId");
     g_txPrompt.requestId = jsonString(root, "requestId");
     g_txPrompt.type = jsonString(root, "type");
@@ -1455,6 +1457,7 @@ static void handleTransactionRequest(cJSON* root) {
 
 static void handleLuaRequest(cJSON* root) {
     g_luaDisplayActive = false;
+    g_forceFullRefresh = true;
     g_luaPrompt.requestId = jsonString(root, "requestId");
     g_luaPrompt.scriptId = jsonString(root, "scriptId");
     g_luaPrompt.title = jsonString(root, "title");
@@ -2181,14 +2184,15 @@ static uint16_t canvasColor(uint16_t displayColor) {
 }
 
 static void refreshLuaCanvas() {
-    display.setFullWindow();
-    display.firstPage();
-    do {
-        display.fillScreen(GxEPD_WHITE);
-        display.drawBitmap(0, 0, g_luaCanvas.getBuffer(), g_luaCanvas.width(), g_luaCanvas.height(), GxEPD_BLACK);
-    } while (display.nextPage());
+    // Copy lua canvas into the UI framebuffer with bit inversion so flushFrame()
+    // can apply the same partial-refresh logic to Lua screens.
+    // Conventions differ: g_luaCanvas bit=1=black; g_frame bit=0=black.
+    const uint8_t* src = g_luaCanvas.getBuffer();
+    uint8_t*       dst = g_frame.getBuffer();
+    for (int i = 0; i < FRAME_BYTES; ++i) dst[i] = ~src[i];
     g_luaDisplayActive = true;
     g_needsRedraw = false;
+    flushFrame();
 }
 
 static void renderBitmap(const LoadedBitmap& bitmap, int x, int y, bool clearScreen) {
@@ -3406,6 +3410,7 @@ static int luaOnionClearDisplay(lua_State*) {
 
 static int luaOnionReleaseDisplay(lua_State*) {
     g_luaDisplayActive = false;
+    g_forceFullRefresh = true;  // guarantee clean full refresh over Lua content
     g_needsRedraw = true;
     return 0;
 }
@@ -4265,6 +4270,7 @@ static void handleButtons() {
 
     if (g_luaDisplayActive) {
         g_luaDisplayActive = false;
+        g_forceFullRefresh = true;  // guarantee clean full refresh over Lua content
         g_screen = SCREEN_STATUS;
         g_needsRedraw = true;
         return;
