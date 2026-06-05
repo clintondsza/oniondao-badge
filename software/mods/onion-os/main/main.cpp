@@ -773,8 +773,10 @@ static void refreshScriptList() {
     File file = root.openNextFile();
     while (file) {
         String name = file.name();
-        if (!file.isDirectory() && name.startsWith("/scripts_") && name.endsWith(".lua")) {
-            g_scripts.push_back(name);
+        if (!file.isDirectory() &&
+            (name.startsWith("/scripts_") || name.startsWith("scripts_")) &&
+            name.endsWith(".lua")) {
+            g_scripts.push_back(name.startsWith("/") ? name : "/" + name);
         }
         file = root.openNextFile();
     }
