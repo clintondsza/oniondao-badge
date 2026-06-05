@@ -209,6 +209,7 @@ static uint8_t g_lastButtons = 0;
 static uint32_t g_lastButtonPoll = 0;
 static uint32_t g_lastHandshake = 0;
 static uint32_t g_lastMqttAttempt = 0;
+static uint32_t g_lastWifiAttempt = 0;
 static uint32_t g_mqttHandshakeSentAt = 0;
 static bool g_mqttHandshakePending = false;
 static String g_log = "Booting";
@@ -915,9 +916,26 @@ static bool ensureWifi() {
     return false;
 }
 
+// Non-blocking background reconnect — fires WiFi.begin() and returns immediately.
+// WiFi driver connects asynchronously; loop() picks up WL_CONNECTED on next check.
+static void triggerWifiReconnect() {
+    if (WiFi.status() == WL_CONNECTED) return;
+    if (g_wifiWorkerResult.load() == WIFI_WORKER_RUNNING) return;
+    if (g_screen == SCREEN_WIFI_OVERVIEW || g_screen == SCREEN_WIFI_SCANNING ||
+        g_screen == SCREEN_WIFI_LIST || g_screen == SCREEN_WIFI_PASSWORD ||
+        g_screen == SCREEN_WIFI_CONNECTING) return;
+    if (!g_config.wifiSsid.length()) return;
+
+    WiFi.mode(WIFI_STA);
+    WiFi.begin(g_config.wifiSsid.c_str(), g_config.wifiPassword.c_str());
+    setLog("WiFi reconnecting...");
+}
+
 // ── WiFi async worker tasks ───────────────────────────────────────────────────
 
 static void wifiScanTask(void*) {
+    WiFi.disconnect();
+    WiFi.mode(WIFI_STA);
     int n = WiFi.scanNetworks(false, false);
     g_wifiNetworks.clear();
     if (n >= 0) {
@@ -4226,6 +4244,7 @@ static void handleButtons() {
             g_wifiOverviewSel = (g_wifiOverviewSel + 1) % 3;
         } else if (pressed & BTN_SELECT) {
             if (g_wifiOverviewSel == 0) {
+                g_lastWifiAttempt = millis(); // prevent background reconnect during scan
                 startWifiScan();
                 g_screen = SCREEN_WIFI_SCANNING;
             } else if (g_wifiOverviewSel == 1) {
@@ -4403,7 +4422,10 @@ void loop() {
         }
     }
 
-    if (WiFi.status() != WL_CONNECTED) ensureWifi();
+    if (WiFi.status() != WL_CONNECTED && millis() - g_lastWifiAttempt > 30000) {
+        g_lastWifiAttempt = millis();
+        triggerWifiReconnect();
+    }
     ensureMqtt();
 
     if (millis() - g_lastHandshake > HANDSHAKE_INTERVAL_MS) {
