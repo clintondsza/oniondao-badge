@@ -158,6 +158,7 @@ enum Screen : uint8_t {
     SCREEN_WIFI_PASSWORD,
     SCREEN_WIFI_CONNECTING,
     SCREEN_WIFI_RESULT,
+    SCREEN_DELETE_CONFIRM,
 };
 
 enum HomeItem : int {
@@ -240,12 +241,14 @@ static String g_log = "Booting";
 static int g_homeSelection = 0;
 static int g_scriptSelection = 0;
 static std::vector<String> g_scripts;
+static String g_pendingDeletePath;
+static bool   g_deleteChoice = false; // false=CANCEL, true=DELETE
 static bool g_luaDisplayActive = false;
 static bool g_ateccReady = false;
 static uint8_t g_ateccSerial[ATECC_SERIAL_LEN] = {};
+#if PIN_BATTERY_ADC >= 0
 static int g_batteryPercent = -1;
 static int g_batteryVoltageMv = 0;
-#if PIN_BATTERY_ADC >= 0
 static int g_batteryDisplayedPercent = -1;
 static uint32_t g_lastBatterySample = 0;
 #endif
@@ -772,15 +775,7 @@ static String clipped(const String& value, size_t len) {
     return value.substring(0, len - 3) + "...";
 }
 
-static String batteryStatusText() {
-    if (g_batteryPercent < 0) return "Battery: --";
-    char text[28];
-    snprintf(text, sizeof(text), "Battery: %d%% %d.%02dV",
-        g_batteryPercent,
-        g_batteryVoltageMv / 1000,
-        (g_batteryVoltageMv % 1000) / 10);
-    return String(text);
-}
+
 
 static void sampleBattery(bool force = false) {
 #if PIN_BATTERY_ADC >= 0
@@ -913,41 +908,10 @@ static void drawHomeItem(HomeItem item, const String& label, int y) {
 // Body is a 28×13 rect; a 3×5 nub on the right edge acts as the terminal.
 // When the level is known the body is filled proportionally left-to-right.
 // When unknown (PIN_BATTERY_ADC not wired) a centred dash is drawn instead.
-static void drawBatteryIcon(int x, int y) {
-    const int bw = 28, bh = 13;
-    const int nw = 3,  nh = 5;
-    g_frame.drawRect(x, y, bw, bh, GxEPD_BLACK);
-    g_frame.fillRect(x + bw, y + (bh - nh) / 2, nw, nh, GxEPD_BLACK);
-    if (g_batteryPercent >= 0) {
-        int fill = ((bw - 2) * g_batteryPercent) / 100;
-        if (fill > 0) g_frame.fillRect(x + 1, y + 1, fill, bh - 2, GxEPD_BLACK);
-        // Low-battery warning: two vertical bars on the right (< 20 %)
-        if (g_batteryPercent < 20) {
-            g_frame.fillRect(x + bw - 5, y + 2, 2, bh - 4, GxEPD_BLACK);
-            g_frame.fillRect(x + bw - 9, y + 2, 2, bh - 4, GxEPD_BLACK);
-        }
-    } else {
-        // No ADC wired — draw a centred dash to signal "unknown"
-        g_frame.fillRect(x + bw / 2 - 4, y + bh / 2 - 1, 8, 2, GxEPD_BLACK);
-    }
-}
 
 static void drawStatus() {
     g_frame.fillScreen(GxEPD_WHITE);
     printLine("ONION OS", 22, &FreeMonoBold18pt7b);
-
-    // Battery icon — top-right of header, clear of the title text
-    drawBatteryIcon(228, 5);
-    // Show numeric level next to icon when the ADC is wired and reporting
-    if (g_batteryPercent >= 0) {
-        char pct[6];
-        snprintf(pct, sizeof(pct), "%d%%", g_batteryPercent);
-        g_frame.setFont(&FreeMono9pt7b);
-        g_frame.setTextColor(GxEPD_BLACK);
-        // Right-align the text immediately left of the icon
-        g_frame.setCursor(226 - (int)strlen(pct) * 7, 17);
-        g_frame.print(pct);
-    }
 
     String user = g_identity.username.length() ? g_identity.username : (g_identity.linked ? "linked" : "not linked");
     printString("User: " + clipped(user, 21), 48, &FreeMonoBold9pt7b);
@@ -979,6 +943,46 @@ static void drawScriptExplorer() {
         printString(prefix + clipped(storedScriptDisplayName(g_scripts[idx]), 24), 52 + row * 20,
             idx == g_scriptSelection ? &FreeMonoBold9pt7b : &FreeMono9pt7b);
     }
+}
+
+static void drawDeleteConfirm() {
+    g_frame.fillScreen(GxEPD_WHITE);
+    // Header
+    g_frame.fillRect(0, 0, ONION_DISPLAY_WIDTH, 28, GxEPD_BLACK);
+    g_frame.setFont(&FreeMonoBold9pt7b);
+    g_frame.setTextColor(GxEPD_WHITE);
+    g_frame.setCursor(6, 20);
+    g_frame.print("DELETE SCRIPT?");
+    // Script name + warning
+    g_frame.setTextColor(GxEPD_BLACK);
+    g_frame.setFont(&FreeMonoBold9pt7b);
+    g_frame.setCursor(6, 50);
+    g_frame.print(clipped(storedScriptDisplayName(g_pendingDeletePath), 24));
+    g_frame.setFont(&FreeMono9pt7b);
+    g_frame.setCursor(6, 72);
+    g_frame.print("This cannot be undone.");
+    g_frame.drawLine(0, 84, ONION_DISPLAY_WIDTH - 1, 84, GxEPD_BLACK);
+    g_frame.setFont(&FreeMonoBold9pt7b);
+    // CANCEL button (left) — filled when selected
+    if (!g_deleteChoice) {
+        g_frame.fillRect(8, 118, 112, 30, GxEPD_BLACK);
+        g_frame.setTextColor(GxEPD_WHITE);
+    } else {
+        g_frame.drawRect(8, 118, 112, 30, GxEPD_BLACK);
+        g_frame.setTextColor(GxEPD_BLACK);
+    }
+    g_frame.setCursor(28, 139);
+    g_frame.print("CANCEL");
+    // DELETE button (right) — filled when selected
+    if (g_deleteChoice) {
+        g_frame.fillRect(144, 118, 112, 30, GxEPD_BLACK);
+        g_frame.setTextColor(GxEPD_WHITE);
+    } else {
+        g_frame.drawRect(144, 118, 112, 30, GxEPD_BLACK);
+        g_frame.setTextColor(GxEPD_BLACK);
+    }
+    g_frame.setCursor(164, 139);
+    g_frame.print("DELETE");
 }
 
 static void drawLinkPrompt() {
@@ -1092,6 +1096,7 @@ static void redraw() {
     else if (g_screen == SCREEN_WIFI_PASSWORD)   drawWifiPassword();
     else if (g_screen == SCREEN_WIFI_CONNECTING) drawWifiConnecting();
     else if (g_screen == SCREEN_WIFI_RESULT)     drawWifiResult();
+    else if (g_screen == SCREEN_DELETE_CONFIRM)  drawDeleteConfirm();
     else drawStatus();
     flushFrame();
     g_needsRedraw = false;
@@ -4675,12 +4680,27 @@ static void handleButtons() {
     } else if (g_screen == SCREEN_LUA_PROMPT) {
         if (pressed & BTN_SELECT) sendLuaPushResponse(true);
         if (pressed & BTN_CANCEL) sendLuaPushResponse(false);
+    } else if (g_screen == SCREEN_DELETE_CONFIRM) {
+        if (pressed & BTN_CANCEL) {
+            g_screen = SCREEN_SCRIPT_EXPLORER;
+        } else if (pressed & BTN_LEFT) {
+            g_deleteChoice = false;
+        } else if (pressed & BTN_RIGHT) {
+            g_deleteChoice = true;
+        } else if (pressed & BTN_SELECT) {
+            if (g_deleteChoice) {
+                deleteStoredScript(g_pendingDeletePath);
+                refreshScriptList();
+            }
+            g_screen = SCREEN_SCRIPT_EXPLORER;
+        }
     } else if (g_screen == SCREEN_SCRIPT_EXPLORER) {
         if (pressed & BTN_CANCEL) {
             g_screen = SCREEN_STATUS;
         } else if ((pressed & BTN_LEFT) && !g_scripts.empty()) {
-            deleteStoredScript(g_scripts[g_scriptSelection]);
-            refreshScriptList();
+            g_pendingDeletePath = g_scripts[g_scriptSelection];
+            g_deleteChoice = false;
+            g_screen = SCREEN_DELETE_CONFIRM;
         } else if ((pressed & BTN_RIGHT)) {
             syncScripts();
             refreshScriptList();
