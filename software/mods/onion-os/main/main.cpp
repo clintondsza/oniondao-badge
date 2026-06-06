@@ -786,6 +786,14 @@ static String imagePathForName(const String& name) {
     return "/images_" + name;
 }
 
+// arduino-esp32 cores differ in whether File::name() keeps the leading "/";
+// without it the startsWith("/images_") filter goes quiet and onion.images()
+// silently returns an empty list (the script explorer handles this inline).
+static String normalizedSpiffsPath(const String& path) {
+    if (path.startsWith("/")) return path;
+    return "/" + path;
+}
+
 static void refreshScriptList() {
     g_scripts.clear();
     File root = SPIFFS.open("/");
@@ -3783,7 +3791,7 @@ static int luaOnionImages(lua_State* L) {
     int index = 1;
     File file = root.openNextFile();
     while (file) {
-        String name = file.name();
+        String name = normalizedSpiffsPath(file.name());
         if (!file.isDirectory() && name.startsWith("/images_")) {
             name.remove(0, 8);
             if (validImageFileName(name)) {
