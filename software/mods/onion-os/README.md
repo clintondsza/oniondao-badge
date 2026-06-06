@@ -158,6 +158,32 @@ Scripts receive a small global `onion` table:
 - `onion.display_buffer()` returns the current Lua canvas as a raw binary string
   (5808 bytes, 264×176 1-bpp bitmap, MSB first, bit=1=black). Use this to capture
   and upload the badge display state to a server after drawing with the display API.
+- `onion.display_begin()` starts a deferred-flush frame. All subsequent
+  `display_*` calls draw into the canvas but do **not** push to the e-paper panel.
+- `onion.display_commit()` ends the deferred frame and pushes exactly one refresh
+  (partial or full) to the panel. Use `display_begin` / `display_commit` to batch
+  a whole screen into a single refresh, avoiding the per-call flash.
+- `onion.display_flush()` pushes the current canvas without ending the deferred
+  frame — useful for animation loops that keep redrawing the same open frame.
+- `onion.display_circle(cx, cy, r, options)` draws or fills a circle. Options:
+  `fill` (bool), `color` (`"black"`/`"white"`), `clear` (bool, default false).
+- `onion.display_triangle(x0, y0, x1, y1, x2, y2, options)` draws or fills a
+  triangle. Same options as `display_circle`.
+- `onion.display_round_rect(x, y, w, h, r, options)` draws or fills a
+  rounded rectangle with corner radius `r`. Same options.
+- `onion.display_pixel(x, y, options)` sets a single pixel. Same options.
+- `onion.kv_set(key, value)` stores a string value in persistent NVS (survives
+  reboots and firmware updates). `key` must be ≤15 chars; `value` ≤1024 bytes.
+  Returns `true`, or `nil` plus an error string.
+- `onion.kv_get(key [, default])` retrieves a previously stored value. Returns
+  the stored string, or `default` (or `nil`) if the key does not exist.
+- `onion.kv_delete(key)` removes a key from persistent storage.
+- `onion.kv_list()` returns a table of stored keys (debug helper).
+- `onion.millis()` returns the badge uptime in milliseconds (wraps at ~49 days).
+  Use this for reliable in-session timing without needing SNTP.
+- `onion.time()` returns the current UNIX epoch in seconds (requires SNTP sync
+  after WiFi connect). Returns `0` when the clock is not yet synced.
+- `onion.time_synced()` returns `true` once SNTP has completed its first sync.
 - `onion.images()` returns a table of downloaded PBM and BMP image asset names.
 - `onion.buttons()` returns a table with the current badge button state:
   `left`, `down`, `up`, `right`, `select`, `cancel`, and integer `mask`.

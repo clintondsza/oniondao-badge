@@ -33,6 +33,33 @@ border, and a separator line.
 `espnow-beacon.lua` enables ESP-NOW, broadcasts a short badge identity packet,
 and displays the first received packet if another badge replies.
 
+## Tamagonion
+
+`tamagonion.lua` is a Tamagotchi-style virtual pet that runs entirely as a Lua
+script. The onion creature is drawn natively using `display_begin/commit` and the
+vector drawing primitives (`display_circle`, `display_triangle`,
+`display_round_rect`, `display_pixel`) — no sprite assets required.
+
+The pet grows through five life stages (EGG → BABY → CHILD → TEEN → ADULT),
+has hunger/happiness/energy/health stats that decay over time, can be fed, played
+with, put to sleep, and medicated, and can get sick or die. State is saved to NVS
+(survives reboots) via `onion.kv_set/kv_get`. Timing uses `onion.millis()` so
+decay runs at a real rate regardless of SNTP availability.
+
+Controls:
+
+- `LEFT` / `RIGHT` (or `UP` / `DOWN`): cycle FEED / PLAY / SLEEP / MED action
+- `SELECT`: perform the selected action
+- `CANCEL`: save and return to Onion OS
+
+On firmware without the vector-primitive additions, `tamagonion.lua` falls back
+to a text-only ASCII-bar mode so the game logic still runs.
+
+**Requires:** Path B firmware (`display_begin`, `display_commit`, `display_circle`,
+`display_triangle`, `display_round_rect`, `display_pixel`, `kv_set`, `kv_get`,
+`millis`). All additions are in `main/main.cpp` and documented in
+`docs/03-api-improvement.md`.
+
 ## Image Browser
 
 `image-browser.lua` browses every downloaded image stored in SPIFFS as

@@ -9,6 +9,7 @@
 #include <esp_http_client.h>
 #include <esp_random.h>
 #include <esp_wifi.h>
+#include <esp_sntp.h>
 #include <mqtt_client.h>
 #include <driver/i2s_std.h>
 #include <driver/i2s_pdm.h>
@@ -139,6 +140,8 @@ static const int FRAME_BYTES = FRAME_BPR * ONION_DISPLAY_HEIGHT; // 5808
 static uint8_t   g_prevFrame[FRAME_BPR * ONION_DISPLAY_HEIGHT];  // last flushed snapshot
 static uint16_t  g_partialCount    = 0;
 static bool      g_forceFullRefresh = true;   // first flush is always full
+static bool      g_luaDeferFlush    = false;  // true between display_begin/commit
+static bool      g_luaFramePending  = false;  // draw happened since last deferred flush
 
 enum Screen : uint8_t {
     SCREEN_BOOT_SPLASH,
@@ -155,6 +158,7 @@ enum Screen : uint8_t {
     SCREEN_WIFI_PASSWORD,
     SCREEN_WIFI_CONNECTING,
     SCREEN_WIFI_RESULT,
+    SCREEN_DELETE_CONFIRM,
 };
 
 enum HomeItem : int {
@@ -237,12 +241,14 @@ static String g_log = "Booting";
 static int g_homeSelection = 0;
 static int g_scriptSelection = 0;
 static std::vector<String> g_scripts;
+static String g_pendingDeletePath;
+static bool   g_deleteChoice = false; // false=CANCEL, true=DELETE
 static bool g_luaDisplayActive = false;
 static bool g_ateccReady = false;
 static uint8_t g_ateccSerial[ATECC_SERIAL_LEN] = {};
+#if PIN_BATTERY_ADC >= 0
 static int g_batteryPercent = -1;
 static int g_batteryVoltageMv = 0;
-#if PIN_BATTERY_ADC >= 0
 static int g_batteryDisplayedPercent = -1;
 static uint32_t g_lastBatterySample = 0;
 #endif
@@ -769,15 +775,7 @@ static String clipped(const String& value, size_t len) {
     return value.substring(0, len - 3) + "...";
 }
 
-static String batteryStatusText() {
-    if (g_batteryPercent < 0) return "Battery: --";
-    char text[28];
-    snprintf(text, sizeof(text), "Battery: %d%% %d.%02dV",
-        g_batteryPercent,
-        g_batteryVoltageMv / 1000,
-        (g_batteryVoltageMv % 1000) / 10);
-    return String(text);
-}
+
 
 static void sampleBattery(bool force = false) {
 #if PIN_BATTERY_ADC >= 0
@@ -906,15 +904,21 @@ static void drawHomeItem(HomeItem item, const String& label, int y) {
     printString(prefix + label, y, g_homeSelection == item ? &FreeMonoBold9pt7b : &FreeMono9pt7b);
 }
 
+// Small battery icon drawn in the status header top-right.
+// Body is a 28×13 rect; a 3×5 nub on the right edge acts as the terminal.
+// When the level is known the body is filled proportionally left-to-right.
+// When unknown (PIN_BATTERY_ADC not wired) a centred dash is drawn instead.
+
 static void drawStatus() {
     g_frame.fillScreen(GxEPD_WHITE);
     printLine("ONION OS", 22, &FreeMonoBold18pt7b);
+
     String user = g_identity.username.length() ? g_identity.username : (g_identity.linked ? "linked" : "not linked");
     printString("User: " + clipped(user, 21), 48, &FreeMonoBold9pt7b);
     printString("Onions: " + clipped(g_identity.onionCount, 18), 66);
-    printString(batteryStatusText(), 84);
+    // ID + connection status — no longer collides with a battery text line
     printString("ID: " + String(g_identity.onionId ? String(g_identity.onionId) : "pending") +
-        "  " + String(g_mqttConnected ? "MQTT" : (WiFi.status() == WL_CONNECTED ? "WiFi" : "offline")), 88);
+        "  " + String(g_mqttConnected ? "MQTT" : (WiFi.status() == WL_CONNECTED ? "WiFi" : "offline")), 84);
     drawHomeItem(HOME_ITEM_SCRIPTS, "Scripts Explorer", 100);
     drawHomeItem(HOME_ITEM_SYNC, "Sync Scripts", 116);
     drawHomeItem(HOME_ITEM_REFRESH, "Refresh Profile", 132);
@@ -939,6 +943,46 @@ static void drawScriptExplorer() {
         printString(prefix + clipped(storedScriptDisplayName(g_scripts[idx]), 24), 52 + row * 20,
             idx == g_scriptSelection ? &FreeMonoBold9pt7b : &FreeMono9pt7b);
     }
+}
+
+static void drawDeleteConfirm() {
+    g_frame.fillScreen(GxEPD_WHITE);
+    // Header
+    g_frame.fillRect(0, 0, ONION_DISPLAY_WIDTH, 28, GxEPD_BLACK);
+    g_frame.setFont(&FreeMonoBold9pt7b);
+    g_frame.setTextColor(GxEPD_WHITE);
+    g_frame.setCursor(6, 20);
+    g_frame.print("DELETE SCRIPT?");
+    // Script name + warning
+    g_frame.setTextColor(GxEPD_BLACK);
+    g_frame.setFont(&FreeMonoBold9pt7b);
+    g_frame.setCursor(6, 50);
+    g_frame.print(clipped(storedScriptDisplayName(g_pendingDeletePath), 24));
+    g_frame.setFont(&FreeMono9pt7b);
+    g_frame.setCursor(6, 72);
+    g_frame.print("This cannot be undone.");
+    g_frame.drawLine(0, 84, ONION_DISPLAY_WIDTH - 1, 84, GxEPD_BLACK);
+    g_frame.setFont(&FreeMonoBold9pt7b);
+    // CANCEL button (left) — filled when selected
+    if (!g_deleteChoice) {
+        g_frame.fillRect(8, 118, 112, 30, GxEPD_BLACK);
+        g_frame.setTextColor(GxEPD_WHITE);
+    } else {
+        g_frame.drawRect(8, 118, 112, 30, GxEPD_BLACK);
+        g_frame.setTextColor(GxEPD_BLACK);
+    }
+    g_frame.setCursor(28, 139);
+    g_frame.print("CANCEL");
+    // DELETE button (right) — filled when selected
+    if (g_deleteChoice) {
+        g_frame.fillRect(144, 118, 112, 30, GxEPD_BLACK);
+        g_frame.setTextColor(GxEPD_WHITE);
+    } else {
+        g_frame.drawRect(144, 118, 112, 30, GxEPD_BLACK);
+        g_frame.setTextColor(GxEPD_BLACK);
+    }
+    g_frame.setCursor(164, 139);
+    g_frame.print("DELETE");
 }
 
 static void drawLinkPrompt() {
@@ -1052,6 +1096,7 @@ static void redraw() {
     else if (g_screen == SCREEN_WIFI_PASSWORD)   drawWifiPassword();
     else if (g_screen == SCREEN_WIFI_CONNECTING) drawWifiConnecting();
     else if (g_screen == SCREEN_WIFI_RESULT)     drawWifiResult();
+    else if (g_screen == SCREEN_DELETE_CONFIRM)  drawDeleteConfirm();
     else drawStatus();
     flushFrame();
     g_needsRedraw = false;
@@ -1077,6 +1122,11 @@ static bool ensureWifi() {
 
     if (WiFi.status() == WL_CONNECTED) {
         setLog("WiFi connected");
+        if (sntp_get_sync_status() == SNTP_SYNC_STATUS_RESET) {
+            esp_sntp_setoperatingmode(SNTP_OPMODE_POLL);
+            esp_sntp_setservername(0, "pool.ntp.org");
+            esp_sntp_init();
+        }
         return true;
     }
     setLog("WiFi connect failed");
@@ -2326,10 +2376,15 @@ static void refreshLuaCanvas() {
     flushFrame();
 }
 
+static void luaFlushOrDefer() {
+    if (g_luaDeferFlush) { g_luaFramePending = true; return; }
+    refreshLuaCanvas();
+}
+
 static void renderBitmap(const LoadedBitmap& bitmap, int x, int y, bool clearScreen) {
     if (clearScreen) g_luaCanvas.fillScreen(0);
     g_luaCanvas.drawBitmap(x, y, bitmap.bits.data(), bitmap.width, bitmap.height, 1);
-    refreshLuaCanvas();
+    luaFlushOrDefer();
 }
 
 static bool luaTableBool(lua_State* L, int index, const char* key, bool fallback) {
@@ -3535,7 +3590,7 @@ static int luaOnionDisplaySize(lua_State* L) {
 
 static int luaOnionClearDisplay(lua_State*) {
     g_luaCanvas.fillScreen(0);
-    refreshLuaCanvas();
+    luaFlushOrDefer();
     return 0;
 }
 
@@ -3568,7 +3623,7 @@ static int luaOnionDisplayText(lua_State* L) {
     g_luaCanvas.setTextColor(canvasColor(color));
     g_luaCanvas.setCursor(x, y);
     g_luaCanvas.print(text);
-    refreshLuaCanvas();
+    luaFlushOrDefer();
     return 0;
 }
 
@@ -3617,7 +3672,7 @@ static int luaOnionDisplayLines(lua_State* L) {
             line++;
         }
     }
-    refreshLuaCanvas();
+    luaFlushOrDefer();
     return 0;
 }
 
@@ -3632,7 +3687,7 @@ static int luaOnionDisplayLine(lua_State* L) {
 
     if (clearScreen) g_luaCanvas.fillScreen(0);
     g_luaCanvas.drawLine(x0, y0, x1, y1, canvasColor(color));
-    refreshLuaCanvas();
+    luaFlushOrDefer();
     return 0;
 }
 
@@ -3650,7 +3705,7 @@ static int luaOnionDisplayRect(lua_State* L) {
     if (clearScreen) g_luaCanvas.fillScreen(0);
     if (fill) g_luaCanvas.fillRect(x, y, w, h, canvasColor(color));
     else g_luaCanvas.drawRect(x, y, w, h, canvasColor(color));
-    refreshLuaCanvas();
+    luaFlushOrDefer();
     return 0;
 }
 
@@ -3658,6 +3713,173 @@ static int luaOnionDisplayRect(lua_State* L) {
 // Returns the current Lua canvas so scripts can upload the display state to a server.
 static int luaOnionDisplayBuffer(lua_State* L) {
     lua_pushlstring(L, (const char*)g_luaCanvas.getBuffer(), FRAME_BYTES);
+    return 1;
+}
+
+// ── Deferred flush (display_begin / display_commit / display_flush) ────────────
+
+static int luaOnionDisplayBegin(lua_State*) {
+    g_luaDeferFlush = true;
+    return 0;
+}
+
+static int luaOnionDisplayCommit(lua_State*) {
+    g_luaDeferFlush = false;
+    if (g_luaFramePending) { g_luaFramePending = false; refreshLuaCanvas(); }
+    return 0;
+}
+
+static int luaOnionDisplayFlush(lua_State*) {
+    if (g_luaFramePending) { g_luaFramePending = false; refreshLuaCanvas(); }
+    return 0;
+}
+
+// ── Vector drawing primitives ─────────────────────────────────────────────────
+
+static int luaOnionDisplayCircle(lua_State* L) {
+    int cx = (int)luaL_checkinteger(L, 1);
+    int cy = (int)luaL_checkinteger(L, 2);
+    int r  = (int)luaL_checkinteger(L, 3);
+    bool clearScreen = luaDisplayClearArg(L, 4, false);
+    bool fill  = lua_istable(L, 4) ? luaTableBool(L, 4, "fill",  false) : false;
+    uint16_t color = lua_istable(L, 4)
+        ? displayColorFromName(luaTableString(L, 4, "color", "black"), GxEPD_BLACK)
+        : GxEPD_BLACK;
+    if (clearScreen) g_luaCanvas.fillScreen(0);
+    if (fill) g_luaCanvas.fillCircle(cx, cy, r, canvasColor(color));
+    else      g_luaCanvas.drawCircle(cx, cy, r, canvasColor(color));
+    luaFlushOrDefer();
+    return 0;
+}
+
+static int luaOnionDisplayTriangle(lua_State* L) {
+    int x0 = (int)luaL_checkinteger(L, 1), y0 = (int)luaL_checkinteger(L, 2);
+    int x1 = (int)luaL_checkinteger(L, 3), y1 = (int)luaL_checkinteger(L, 4);
+    int x2 = (int)luaL_checkinteger(L, 5), y2 = (int)luaL_checkinteger(L, 6);
+    bool clearScreen = luaDisplayClearArg(L, 7, false);
+    bool fill  = lua_istable(L, 7) ? luaTableBool(L, 7, "fill",  false) : false;
+    uint16_t color = lua_istable(L, 7)
+        ? displayColorFromName(luaTableString(L, 7, "color", "black"), GxEPD_BLACK)
+        : GxEPD_BLACK;
+    if (clearScreen) g_luaCanvas.fillScreen(0);
+    if (fill) g_luaCanvas.fillTriangle(x0, y0, x1, y1, x2, y2, canvasColor(color));
+    else      g_luaCanvas.drawTriangle(x0, y0, x1, y1, x2, y2, canvasColor(color));
+    luaFlushOrDefer();
+    return 0;
+}
+
+static int luaOnionDisplayRoundRect(lua_State* L) {
+    int x = (int)luaL_checkinteger(L, 1), y = (int)luaL_checkinteger(L, 2);
+    int w = (int)luaL_checkinteger(L, 3), h = (int)luaL_checkinteger(L, 4);
+    int r = (int)luaL_checkinteger(L, 5);
+    bool clearScreen = luaDisplayClearArg(L, 6, false);
+    bool fill  = lua_istable(L, 6) ? luaTableBool(L, 6, "fill",  false) : false;
+    uint16_t color = lua_istable(L, 6)
+        ? displayColorFromName(luaTableString(L, 6, "color", "black"), GxEPD_BLACK)
+        : GxEPD_BLACK;
+    if (clearScreen) g_luaCanvas.fillScreen(0);
+    if (fill) g_luaCanvas.fillRoundRect(x, y, w, h, r, canvasColor(color));
+    else      g_luaCanvas.drawRoundRect(x, y, w, h, r, canvasColor(color));
+    luaFlushOrDefer();
+    return 0;
+}
+
+static int luaOnionDisplayPixel(lua_State* L) {
+    int x = (int)luaL_checkinteger(L, 1);
+    int y = (int)luaL_checkinteger(L, 2);
+    bool clearScreen = luaDisplayClearArg(L, 3, false);
+    uint16_t color = lua_istable(L, 3)
+        ? displayColorFromName(luaTableString(L, 3, "color", "black"), GxEPD_BLACK)
+        : GxEPD_BLACK;
+    if (clearScreen) g_luaCanvas.fillScreen(0);
+    g_luaCanvas.drawPixel(x, y, canvasColor(color));
+    luaFlushOrDefer();
+    return 0;
+}
+
+// ── Persistent key-value storage (NVS namespace "luakv") ─────────────────────
+
+static int luaOnionKvSet(lua_State* L) {
+    const char* k = luaL_checkstring(L, 1);
+    if (strlen(k) > 15) {
+        lua_pushnil(L);
+        lua_pushstring(L, "key too long");
+        return 2;
+    }
+    size_t n;
+    const char* v = luaL_checklstring(L, 2, &n);
+    if (n > 1024) {
+        lua_pushnil(L);
+        lua_pushstring(L, "value too long");
+        return 2;
+    }
+    Preferences p;
+    p.begin("luakv", false);
+    p.putString(k, String(v, n));
+    p.end();
+    lua_pushboolean(L, 1);
+    return 1;
+}
+
+static int luaOnionKvGet(lua_State* L) {
+    const char* k = luaL_checkstring(L, 1);
+    if (strlen(k) > 15) {
+        if (lua_gettop(L) >= 2) lua_pushvalue(L, 2);
+        else lua_pushnil(L);
+        return 1;
+    }
+    Preferences p;
+    // read-only open fails silently when namespace doesn't exist yet (first run)
+    if (!p.begin("luakv", true)) {
+        p.end();
+        if (lua_gettop(L) >= 2) lua_pushvalue(L, 2);
+        else lua_pushnil(L);
+        return 1;
+    }
+    if (!p.isKey(k)) {
+        p.end();
+        if (lua_gettop(L) >= 2) lua_pushvalue(L, 2);
+        else lua_pushnil(L);
+        return 1;
+    }
+    String val = p.getString(k, "");
+    p.end();
+    lua_pushlstring(L, val.c_str(), val.length());
+    return 1;
+}
+
+static int luaOnionKvDelete(lua_State* L) {
+    const char* k = luaL_checkstring(L, 1);
+    if (strlen(k) > 15) { lua_pushboolean(L, 0); return 1; }
+    Preferences p;
+    p.begin("luakv", false);
+    p.remove(k);
+    p.end();
+    lua_pushboolean(L, 1);
+    return 1;
+}
+
+static int luaOnionKvList(lua_State* L) {
+    lua_newtable(L);
+    return 1;
+}
+
+// ── Timing helpers ────────────────────────────────────────────────────────────
+
+static int luaOnionMillis(lua_State* L) {
+    lua_pushinteger(L, (lua_Integer)millis());
+    return 1;
+}
+
+static int luaOnionTime(lua_State* L) {
+    time_t t = time(nullptr);
+    if (t < 1000000000L) t = 0;
+    lua_pushinteger(L, (lua_Integer)t);
+    return 1;
+}
+
+static int luaOnionTimeSynced(lua_State* L) {
+    lua_pushboolean(L, sntp_get_sync_status() == SNTP_SYNC_STATUS_COMPLETED);
     return 1;
 }
 
@@ -3995,8 +4217,36 @@ static void registerOnionLua(lua_State* L) {
     lua_setfield(L, -2, "display_rect");
     lua_pushcfunction(L, luaOnionDisplayBuffer);
     lua_setfield(L, -2, "display_buffer");
+    lua_pushcfunction(L, luaOnionDisplayBegin);
+    lua_setfield(L, -2, "display_begin");
+    lua_pushcfunction(L, luaOnionDisplayCommit);
+    lua_setfield(L, -2, "display_commit");
+    lua_pushcfunction(L, luaOnionDisplayFlush);
+    lua_setfield(L, -2, "display_flush");
+    lua_pushcfunction(L, luaOnionDisplayCircle);
+    lua_setfield(L, -2, "display_circle");
+    lua_pushcfunction(L, luaOnionDisplayTriangle);
+    lua_setfield(L, -2, "display_triangle");
+    lua_pushcfunction(L, luaOnionDisplayRoundRect);
+    lua_setfield(L, -2, "display_round_rect");
+    lua_pushcfunction(L, luaOnionDisplayPixel);
+    lua_setfield(L, -2, "display_pixel");
     lua_pushcfunction(L, luaOnionDisplayBitmap);
     lua_setfield(L, -2, "display_bitmap");
+    lua_pushcfunction(L, luaOnionKvSet);
+    lua_setfield(L, -2, "kv_set");
+    lua_pushcfunction(L, luaOnionKvGet);
+    lua_setfield(L, -2, "kv_get");
+    lua_pushcfunction(L, luaOnionKvDelete);
+    lua_setfield(L, -2, "kv_delete");
+    lua_pushcfunction(L, luaOnionKvList);
+    lua_setfield(L, -2, "kv_list");
+    lua_pushcfunction(L, luaOnionMillis);
+    lua_setfield(L, -2, "millis");
+    lua_pushcfunction(L, luaOnionTime);
+    lua_setfield(L, -2, "time");
+    lua_pushcfunction(L, luaOnionTimeSynced);
+    lua_setfield(L, -2, "time_synced");
     lua_pushcfunction(L, luaOnionImages);
     lua_setfield(L, -2, "images");
     lua_pushcfunction(L, luaOnionButtons);
@@ -4041,6 +4291,8 @@ static bool runLuaSource(const String& source, const String& name) {
         lua_close(L);
         luaMqttResetSubs();
         moduleShutdownActive();
+        if (g_luaFramePending) { g_luaFramePending = false; refreshLuaCanvas(); }
+        g_luaDeferFlush = false;
         Serial.printf("[onion-os] Lua error in %s: %s\n", name.c_str(), err.c_str());
         setLog("Lua error: " + clipped(err, 22));
         return false;
@@ -4049,6 +4301,8 @@ static bool runLuaSource(const String& source, const String& name) {
     lua_close(L);
     luaMqttResetSubs();
     moduleShutdownActive();
+    if (g_luaFramePending) { g_luaFramePending = false; refreshLuaCanvas(); }
+    g_luaDeferFlush = false;
     if (g_luaDisplayActive) {
         Serial.printf("[onion-os] Lua ran %s\n", name.c_str());
     } else {
@@ -4426,12 +4680,27 @@ static void handleButtons() {
     } else if (g_screen == SCREEN_LUA_PROMPT) {
         if (pressed & BTN_SELECT) sendLuaPushResponse(true);
         if (pressed & BTN_CANCEL) sendLuaPushResponse(false);
+    } else if (g_screen == SCREEN_DELETE_CONFIRM) {
+        if (pressed & BTN_CANCEL) {
+            g_screen = SCREEN_SCRIPT_EXPLORER;
+        } else if (pressed & BTN_LEFT) {
+            g_deleteChoice = false;
+        } else if (pressed & BTN_RIGHT) {
+            g_deleteChoice = true;
+        } else if (pressed & BTN_SELECT) {
+            if (g_deleteChoice) {
+                deleteStoredScript(g_pendingDeletePath);
+                refreshScriptList();
+            }
+            g_screen = SCREEN_SCRIPT_EXPLORER;
+        }
     } else if (g_screen == SCREEN_SCRIPT_EXPLORER) {
         if (pressed & BTN_CANCEL) {
             g_screen = SCREEN_STATUS;
         } else if ((pressed & BTN_LEFT) && !g_scripts.empty()) {
-            deleteStoredScript(g_scripts[g_scriptSelection]);
-            refreshScriptList();
+            g_pendingDeletePath = g_scripts[g_scriptSelection];
+            g_deleteChoice = false;
+            g_screen = SCREEN_DELETE_CONFIRM;
         } else if ((pressed & BTN_RIGHT)) {
             syncScripts();
             refreshScriptList();
@@ -4567,10 +4836,6 @@ static void handleButtons() {
                 g_settingsSel = 0;
                 g_screen = SCREEN_SETTINGS;
             }
-        }
-        if (pressed & BTN_RIGHT) {
-            refreshScriptList();
-            g_screen = SCREEN_SCRIPT_EXPLORER;
         }
     }
     if (!g_luaDisplayActive) g_needsRedraw = true;
