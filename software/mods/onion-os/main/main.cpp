@@ -1067,12 +1067,13 @@ static int kbCellW(int row) {
 }
 
 static int kbStartX(int row) {
-    if (row == 2) return 1;
-    if (row == 3) return 2;
-    return 2; // rows 0,1,4 (row 4: cell 22px × 12 = 264, start 0)
+    if (row == 2) return 2;  // asdfghjkl: 9×29=261, center in 264
+    if (row == 3) return 3;  // zxcvbnm:   7×37=259, center in 264
+    return 2;                // rows 0,1: 10×26=260, center in 264
+                             // row 4: 12×22=264, start 0 (handled separately)
 }
 
-static int kbBoxY(int row) { return 36 + row * 20; }
+static int kbBoxY(int row) { return 36 + row * 23; }
 
 // ── WiFi screen draw functions ────────────────────────────────────────────────
 
@@ -1135,62 +1136,76 @@ static void drawWifiList() {
 static void drawWifiPassword() {
     g_frame.fillScreen(GxEPD_WHITE);
 
-    // Header
-    printString("Net: " + clipped(g_wifiConnectSsid, 24), 14, &FreeMonoBold9pt7b);
+    // Header — FreeMono9pt7b, same as rest of UI
+    // Net baseline y=12 (text y=2..12), Pass baseline y=28 (asterisk top ~y=20)
+    // Gap between lines ~8px; keyboard starts y=36 (8px below pass baseline)
+    g_frame.setFont(&FreeMono9pt7b);
+    g_frame.setTextColor(GxEPD_BLACK);
+    g_frame.setCursor(4, 12);
+    g_frame.print("Net: " + g_wifiConnectSsid);
+    g_frame.setCursor(4, 28);
     String passLine = "Pass: ";
+    passLine.reserve(g_wifiPassLen + 8);
     for (int i = 0; i < g_wifiPassLen; i++) passLine += '*';
     passLine += '_';
-    printString(clipped(passLine, 28), 29);
+    g_frame.print(passLine);
 
-    // Key box geometry
-    const int kCellH = 18;
-    const int kBaseline = 13; // baseline within cell
+    // Keyboard — kbBoxY = 36 + row*23, kCellH = 22 (1px gap between rows)
+    // Row 5: y=36+5*23=151, height=22, bottom=173 → 3px white edge at bottom
+    const int kCellH    = 22;
+    const int kBaseline = 16; // baseline within 22px cell
 
-    // Control row widths (CAPS, SPACE, DEL, OK) sum to 264
-    const int kCtrlW[4] = {58, 90, 58, 58};
-    const char* kCtrlLabel[4] = {"CAPS", "SPACE", "DEL", "OK"};
+    // Control row: CAPS(58) + SPACE(90) + DEL(58) + OK(58) = 264px
+    const int         kCtrlW[4]     = {58, 90, 58, 58};
+    const char* const kCtrlLabel[4] = {"CAPS", "SPACE", "DEL", "OK"};
 
     for (int row = 0; row < kKbTotalRows; row++) {
-        int boxY = kbBoxY(row);
+        const int boxY = kbBoxY(row);
 
         if (row < 5) {
             const char* rowStr = g_kbCaps ? kKbCaps[row] : kKbNormal[row];
-            int len = (int)strlen(rowStr);
-            int cw = (row == 4) ? 22 : kbCellW(row);
-            int sx = (row == 4) ? 0 : kbStartX(row);
+            const int   len    = (int)strlen(rowStr);
+            const int   cw     = (row == 4) ? 22 : kbCellW(row);
+            const int   sx     = (row == 4) ?  0 : kbStartX(row);
 
             for (int col = 0; col < len; col++) {
-                int cx = sx + col * cw;
-                bool sel = (g_kbRow == row && g_kbCol == col);
+                const int  cx  = sx + col * cw;
+                const bool sel = (g_kbRow == row && g_kbCol == col);
                 if (sel) {
                     g_frame.fillRect(cx, boxY, cw - 1, kCellH, GxEPD_BLACK);
                     g_frame.setTextColor(GxEPD_WHITE);
                 } else {
+                    g_frame.fillRect(cx, boxY, cw - 1, kCellH, GxEPD_WHITE);
                     g_frame.drawRect(cx, boxY, cw - 1, kCellH, GxEPD_BLACK);
                     g_frame.setTextColor(GxEPD_BLACK);
                 }
                 g_frame.setFont(&FreeMono9pt7b);
-                g_frame.setCursor(cx + (cw - 7) / 2, boxY + kBaseline);
-                g_frame.print(rowStr[col]);
+                char ch[2] = {rowStr[col], '\0'};
+                int16_t tx1, ty1; uint16_t tw, th;
+                g_frame.getTextBounds(ch, 0, 0, &tx1, &ty1, &tw, &th);
+                g_frame.setCursor(cx + ((cw - 1) - (int)tw) / 2 - tx1, boxY + kBaseline);
+                g_frame.print(ch);
             }
         } else {
             // Control row
             int x = 0;
             for (int col = 0; col < 4; col++) {
-                int w = kCtrlW[col];
-                bool sel = (g_kbRow == 5 && g_kbCol == col);
-                bool capsLit = (col == 0 && g_kbCaps);
-                bool inv = sel || capsLit;
+                const int  w       = kCtrlW[col];
+                const bool sel     = (g_kbRow == 5 && g_kbCol == col);
+                const bool capsLit = (col == 0 && g_kbCaps);
+                const bool inv     = sel || capsLit;
                 if (inv) {
                     g_frame.fillRect(x, boxY, w - 1, kCellH, GxEPD_BLACK);
                     g_frame.setTextColor(GxEPD_WHITE);
                 } else {
+                    g_frame.fillRect(x, boxY, w - 1, kCellH, GxEPD_WHITE);
                     g_frame.drawRect(x, boxY, w - 1, kCellH, GxEPD_BLACK);
                     g_frame.setTextColor(GxEPD_BLACK);
                 }
                 g_frame.setFont(&FreeMono9pt7b);
-                int lw = (int)strlen(kCtrlLabel[col]) * 7;
-                g_frame.setCursor(x + (w - lw) / 2, boxY + kBaseline);
+                int16_t tx1, ty1; uint16_t tw, th;
+                g_frame.getTextBounds(kCtrlLabel[col], 0, 0, &tx1, &ty1, &tw, &th);
+                g_frame.setCursor(x + ((w - 1) - (int)tw) / 2 - tx1, boxY + kBaseline);
                 g_frame.print(kCtrlLabel[col]);
                 x += w;
             }
@@ -1469,6 +1484,11 @@ static void handleLuaRequest(cJSON* root) {
     g_luaPrompt.active = true;
     g_screen = SCREEN_LUA_PROMPT;
     setLog("Lua push received");
+    Serial.printf("[onion-os] Lua push: fileName=%s scriptId=%s codeLen=%d\n",
+        g_luaPrompt.fileName.c_str(), g_luaPrompt.scriptId.c_str(), g_luaPrompt.code.length());
+    Serial.println("[onion-os] Lua code:---");
+    Serial.println(g_luaPrompt.code);
+    Serial.println("[onion-os] ---end code");
 }
 
 static void handleMqttPayload(const String& incomingTopic, const String& payload) {
@@ -1592,11 +1612,25 @@ static void mqttEventHandler(void*, esp_event_base_t, int32_t eventId, void* eve
         setLog("MQTT disconnected");
         break;
     case MQTT_EVENT_DATA: {
-        String incomingTopic(event->topic, event->topic_len);
-        String payload(event->data, event->data_len);
-        luaMqttMaybeQueue(incomingTopic.c_str(), (uint16_t)incomingTopic.length(),
-                          payload.c_str(), (uint16_t)payload.length());
-        handleMqttPayload(incomingTopic, payload);
+        // ESP-IDF fragments large payloads across multiple MQTT_EVENT_DATA events.
+        // Accumulate until current_data_offset + data_len == total_data_len.
+        static String s_fragTopic;
+        static String s_fragPayload;
+
+        if (event->current_data_offset == 0) {
+            s_fragTopic   = String(event->topic, event->topic_len);
+            s_fragPayload = String(event->data,  event->data_len);
+        } else {
+            s_fragPayload += String(event->data, event->data_len);
+        }
+
+        if ((int)s_fragPayload.length() < event->total_data_len) break;
+
+        luaMqttMaybeQueue(s_fragTopic.c_str(), (uint16_t)s_fragTopic.length(),
+                          s_fragPayload.c_str(), (uint16_t)s_fragPayload.length());
+        handleMqttPayload(s_fragTopic, s_fragPayload);
+        s_fragTopic   = "";
+        s_fragPayload = "";
         break;
     }
     default:
@@ -3523,6 +3557,13 @@ static int luaOnionDisplayRect(lua_State* L) {
     return 0;
 }
 
+// onion.display_buffer() -> string (5808 raw bytes, 264×176 1-bpp, bit=1=black)
+// Returns the current Lua canvas so scripts can upload the display state to a server.
+static int luaOnionDisplayBuffer(lua_State* L) {
+    lua_pushlstring(L, (const char*)g_luaCanvas.getBuffer(), FRAME_BYTES);
+    return 1;
+}
+
 static int luaOnionDisplayBitmap(lua_State* L) {
     String name = luaL_checkstring(L, 1);
     int x = (int)luaL_optinteger(L, 2, 0);
@@ -3855,6 +3896,8 @@ static void registerOnionLua(lua_State* L) {
     lua_setfield(L, -2, "display_line");
     lua_pushcfunction(L, luaOnionDisplayRect);
     lua_setfield(L, -2, "display_rect");
+    lua_pushcfunction(L, luaOnionDisplayBuffer);
+    lua_setfield(L, -2, "display_buffer");
     lua_pushcfunction(L, luaOnionDisplayBitmap);
     lua_setfield(L, -2, "display_bitmap");
     lua_pushcfunction(L, luaOnionImages);
@@ -3901,6 +3944,7 @@ static bool runLuaSource(const String& source, const String& name) {
         lua_close(L);
         luaMqttResetSubs();
         moduleShutdownActive();
+        Serial.printf("[onion-os] Lua error in %s: %s\n", name.c_str(), err.c_str());
         setLog("Lua error: " + clipped(err, 22));
         return false;
     }
