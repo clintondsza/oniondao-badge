@@ -196,7 +196,7 @@ Rules:
 - `title`: required, 1-80 characters.
 - `description`: optional, trimmed to 500 characters.
 - `fileName`: optional. Must end in `.lua` and use only letters, numbers, dots, dashes, or underscores. Defaults from title.
-- `code`: required, max 64KB.
+- `code`: required, max 256 KB.
 - `tags`: optional array or comma-separated string. Up to 8 normalized tags.
 - `isPublic`: defaults to `true`. Only public scripts appear in badge-facing endpoints.
 

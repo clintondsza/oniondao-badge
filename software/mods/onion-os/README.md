@@ -121,6 +121,9 @@ script explorer that lists both manifest-downloaded scripts and server-pushed
 scripts from SPIFFS. In the script explorer, selecting `Update Scripts`
 downloads the configured manifest; selecting a script runs it, `LEFT` deletes
 the highlighted script from the badge, and `CANCEL` returns home.
+Lua scripts and pushed Lua bundles may be up to 256 KB each. This is a firmware
+guardrail for RAM during MQTT JSON parsing and Lua loading; total stored scripts
+and assets are still limited by the 1.5 MB SPIFFS partition.
 
 The handshake routes currently only return `onionId` and `status`. After a badge
 is linked, the firmware refreshes its owner profile by Onion ID with
