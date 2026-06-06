@@ -36,9 +36,6 @@ extern "C" {
 #include <string>
 #include <vector>
 
-#include "badge_pins.h"
-#include "logo_bitmap.h"
-
 #if __has_include("onion_config.h")
 #include "onion_config.h"
 #else
@@ -52,6 +49,9 @@ extern "C" {
 #define ONION_DEFAULT_MQTT_TOPIC_PREFIX "oniondao"
 #define ONION_DEFAULT_SCRIPT_MANIFEST_URL ""
 #endif
+
+#include "badge_pins.h"
+#include "logo_bitmap.h"
 
 #define ONION_HARDCODED_WIFI_SSID "CIC Guest"
 #define ONION_HARDCODED_WIFI_PASSWORD "1nnovation"
@@ -113,6 +113,17 @@ extern "C" {
 #define SOUND_MIC_MAX_SAMPLES 4096
 #define ONION_DISPLAY_WIDTH 264
 #define ONION_DISPLAY_HEIGHT 176
+#ifndef PIN_BATTERY_ADC
+#define PIN_BATTERY_ADC -1
+#endif
+#ifndef BATTERY_ADC_DIVIDER_RATIO
+#define BATTERY_ADC_DIVIDER_RATIO 2.0f
+#endif
+#ifndef BATTERY_ADC_OFFSET_MV
+#define BATTERY_ADC_OFFSET_MV 0
+#endif
+#define BATTERY_SAMPLE_INTERVAL_MS 60000
+#define BATTERY_REDRAW_PERCENT_STEP 5
 
 GxEPD2_BW<GxEPD2_270_GDEY027T91, GxEPD2_270_GDEY027T91::HEIGHT> display(
     GxEPD2_270_GDEY027T91(PIN_EPD_CS, PIN_EPD_DC, PIN_EPD_RST, PIN_EPD_BUSY)
@@ -208,6 +219,12 @@ static std::vector<String> g_scripts;
 static bool g_luaDisplayActive = false;
 static bool g_ateccReady = false;
 static uint8_t g_ateccSerial[ATECC_SERIAL_LEN] = {};
+static int g_batteryPercent = -1;
+static int g_batteryVoltageMv = 0;
+#if PIN_BATTERY_ADC >= 0
+static int g_batteryDisplayedPercent = -1;
+static uint32_t g_lastBatterySample = 0;
+#endif
 
 static const int kLuaReadableGpios[] = {48, 47, 19, 42, 41, 40, 38, 39, 16, 15, 7, 6, 5, 4};
 
@@ -650,6 +667,12 @@ static void initPeripherals() {
     display.init(SERIAL_BAUD, true, 10, false);
     display.setRotation(1);
 
+#if PIN_BATTERY_ADC >= 0
+    pinMode(PIN_BATTERY_ADC, INPUT);
+    analogReadResolution(12);
+    analogSetPinAttenuation(PIN_BATTERY_ADC, ADC_11db);
+#endif
+
     SPIFFS.begin(true);
 }
 
@@ -675,6 +698,79 @@ static void printString(const String& text, int y, const GFXfont* font = &FreeMo
 static String clipped(const String& value, size_t len) {
     if (value.length() <= len) return value;
     return value.substring(0, len - 3) + "...";
+}
+
+static String batteryStatusText() {
+    if (g_batteryPercent < 0) return "Battery: --";
+    char text[28];
+    snprintf(text, sizeof(text), "Battery: %d%% %d.%02dV",
+        g_batteryPercent,
+        g_batteryVoltageMv / 1000,
+        (g_batteryVoltageMv % 1000) / 10);
+    return String(text);
+}
+
+static void sampleBattery(bool force = false) {
+#if PIN_BATTERY_ADC >= 0
+    struct CurvePoint {
+        int mv;
+        int percent;
+    };
+    static const CurvePoint curve[] = {
+        {4200, 100},
+        {4110, 90},
+        {4020, 80},
+        {3920, 70},
+        {3840, 60},
+        {3790, 50},
+        {3750, 40},
+        {3710, 30},
+        {3670, 20},
+        {3610, 10},
+        {3300, 0},
+    };
+
+    uint32_t now = millis();
+    if (!force && now - g_lastBatterySample < BATTERY_SAMPLE_INTERVAL_MS) return;
+    g_lastBatterySample = now;
+
+    analogRead(PIN_BATTERY_ADC);
+    uint32_t pinMv = 0;
+    const int samples = 8;
+    for (int i = 0; i < samples; ++i) {
+        pinMv += analogReadMilliVolts(PIN_BATTERY_ADC);
+        delay(2);
+    }
+    pinMv /= samples;
+
+    int batteryMv = (int)lroundf((float)pinMv * BATTERY_ADC_DIVIDER_RATIO) + BATTERY_ADC_OFFSET_MV;
+    int percent = 0;
+    if (batteryMv >= curve[0].mv) {
+        percent = 100;
+    } else {
+        for (size_t i = 1; i < sizeof(curve) / sizeof(curve[0]); ++i) {
+            if (batteryMv >= curve[i].mv) {
+                int highMv = curve[i - 1].mv;
+                int lowMv = curve[i].mv;
+                int highPct = curve[i - 1].percent;
+                int lowPct = curve[i].percent;
+                percent = lowPct + ((batteryMv - lowMv) * (highPct - lowPct)) / (highMv - lowMv);
+                break;
+            }
+        }
+    }
+    bool shouldRedraw = force || g_batteryDisplayedPercent < 0 ||
+        abs(percent - g_batteryDisplayedPercent) >= BATTERY_REDRAW_PERCENT_STEP;
+
+    g_batteryVoltageMv = batteryMv;
+    g_batteryPercent = percent;
+    if (shouldRedraw) {
+        g_batteryDisplayedPercent = percent;
+        if (g_screen == SCREEN_STATUS) g_needsRedraw = true;
+    }
+#else
+    (void)force;
+#endif
 }
 
 static String storedScriptDisplayName(const String& path) {
@@ -744,13 +840,14 @@ static void drawStatus() {
     printLine("ONION OS", 22, &FreeMonoBold18pt7b);
     String user = g_identity.username.length() ? g_identity.username : (g_identity.linked ? "linked" : "not linked");
     printString("User: " + clipped(user, 21), 48, &FreeMonoBold9pt7b);
-    printString("Onions: " + clipped(g_identity.onionCount, 18), 68);
+    printString("Onions: " + clipped(g_identity.onionCount, 18), 66);
+    printString(batteryStatusText(), 84);
     printString("ID: " + String(g_identity.onionId ? String(g_identity.onionId) : "pending") +
-        "  " + String(g_mqttConnected ? "MQTT" : (WiFi.status() == WL_CONNECTED ? "WiFi" : "offline")), 88);
-    drawHomeItem(HOME_ITEM_SCRIPTS, "Scripts Explorer", 110);
-    drawHomeItem(HOME_ITEM_SYNC, "Sync Scripts", 130);
-    drawHomeItem(HOME_ITEM_REFRESH, "Refresh Profile", 150);
-    printString(clipped(g_log, 30), 170);
+        "  " + String(g_mqttConnected ? "MQTT" : (WiFi.status() == WL_CONNECTED ? "WiFi" : "offline")), 102);
+    drawHomeItem(HOME_ITEM_SCRIPTS, "Scripts Explorer", 122);
+    drawHomeItem(HOME_ITEM_SYNC, "Sync Scripts", 140);
+    drawHomeItem(HOME_ITEM_REFRESH, "Refresh Profile", 158);
+    printString(clipped(g_log, 30), 172);
 }
 
 static void drawScriptExplorer() {
@@ -3955,6 +4052,7 @@ void setup() {
     g_needsRedraw = true;
     redraw();
     delay(BOOT_SPLASH_MS);
+    sampleBattery(true);
     g_screen = SCREEN_STATUS;
     g_needsRedraw = true;
     redraw();
@@ -3971,6 +4069,7 @@ void setup() {
 void loop() {
     handleSerial();
     handleButtons();
+    sampleBattery();
 
     if (WiFi.status() != WL_CONNECTED) ensureWifi();
     ensureMqtt();
