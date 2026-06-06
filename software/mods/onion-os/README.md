@@ -31,6 +31,14 @@ other badge firmware in this repo.
 - Script manifest download and SPIFFS storage.
 - Lua script execution through Espressif's Lua component.
 - Server-pushed Lua script approval popup, install, and run flow.
+- Partial-refresh e-paper rendering: a retained `GFXcanvas1` framebuffer diffs
+  against the previous frame and uses `setPartialWindow` for small changes
+  (~300–500 ms, no flash) and `setFullWindow` only when >75 % of the panel
+  changes or every 30 partial updates (ghost clearing). Lua canvas frames go
+  through the same path via bit-invert copy.
+- MQTT large-payload reassembly: fragmented payloads (e.g. large Lua scripts)
+  are accumulated across `MQTT_EVENT_DATA` events before being parsed, fixing
+  the "Bad MQTT JSON" error on server-pushed scripts.
 - Badge-owned Solana Ed25519 wallet generation.
 - ATECC608B-backed seed wrapping and approval attestation.
 - Solana transaction signing for server-built burn/transfer transactions.
@@ -147,6 +155,9 @@ Scripts receive a small global `onion` table:
   `{ fill = true }` to fill it. Clear defaults to false.
 - `onion.display_bitmap(name, x, y, clear)` draws a downloaded PBM or BMP image
   asset. Pass `-1` for `x` or `y` to center that axis. `clear` defaults to true.
+- `onion.display_buffer()` returns the current Lua canvas as a raw binary string
+  (5808 bytes, 264×176 1-bpp bitmap, MSB first, bit=1=black). Use this to capture
+  and upload the badge display state to a server after drawing with the display API.
 - `onion.images()` returns a table of downloaded PBM and BMP image asset names.
 - `onion.buttons()` returns a table with the current badge button state:
   `left`, `down`, `up`, `right`, `select`, `cancel`, and integer `mask`.
