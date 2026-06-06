@@ -18,6 +18,20 @@ The helper auto-loads common ESP-IDF installs, including
 `IDF_EXPORT=/path/to/esp-idf/export.sh` if your ESP-IDF install lives somewhere
 else.
 
+## Serial Monitor Helper
+
+`monitor-serial.sh` searches common serial ports, detects ESP board types, lets
+you select the matching device, and opens `idf.py monitor`:
+
+```sh
+scripts/monitor-serial.sh
+```
+
+It defaults to ESP32-S3 badges and 115200 baud. Use `--board any` to show every
+connected serial port, `--list` to print detected ports without opening the
+monitor, or `--port /dev/cu.usbserial-210` to skip selection. Press `Ctrl-C` to
+stop the monitor and close any child monitor process.
+
 ## Lua Scripts
 
 Example Lua scripts in this directory are meant to be copied into the Onion OS

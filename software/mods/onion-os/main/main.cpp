@@ -7,6 +7,7 @@
 #include <esp_now.h>
 #include <esp_crt_bundle.h>
 #include <esp_http_client.h>
+#include <esp_heap_caps.h>
 #include <esp_random.h>
 #include <esp_wifi.h>
 #include <esp_sntp.h>
@@ -80,7 +81,11 @@ extern "C" {
 #define MQTT_HANDSHAKE_ACCEPT_WINDOW_MS 10000
 #define BOOT_SPLASH_MS 3000
 #define MAX_SCRIPT_BYTES (256 * 1024)
+#define MQTT_CLIENT_BUFFER_BYTES (32 * 1024)
+#define MQTT_CLIENT_OUT_BUFFER_BYTES 4096
 #define MQTT_RX_MAX_BYTES (MAX_SCRIPT_BYTES * 2 + 4096)
+#define MQTT_RX_TEMP_JSON_PATH "/mqtt_lua_push.json"
+#define LUA_PUSH_TEMP_PATH "/scripts_push_tmp.lua"
 #define MAX_IMAGE_BYTES (192 * 1024)
 #define ATECC_HMAC_SLOT 10
 #define ATECC_I2C_ADDRESS_8BIT 0xC0
@@ -214,7 +219,9 @@ struct LuaScriptPrompt {
     String fileName;
     String description;
     String authorUsername;
+    String downloadUrl;
     String code;
+    String codePath;
     int sizeBytes = 0;
     bool active = false;
 };
@@ -238,6 +245,7 @@ static uint32_t g_lastWifiAttempt = 0;
 static uint32_t g_mqttHandshakeSentAt = 0;
 static bool g_mqttHandshakePending = false;
 static String g_log = "Booting";
+static String g_lastLuaError;
 static int g_homeSelection = 0;
 static int g_scriptSelection = 0;
 static std::vector<String> g_scripts;
@@ -353,8 +361,12 @@ static MqttQueuedMessage g_luaMqttQueue[ONION_LUA_MQTT_QUEUE_LEN];
 static uint8_t g_luaMqttQueueHead = 0;
 static uint8_t g_luaMqttQueueCount = 0;
 static String g_mqttRxTopic;
-static String g_mqttRxPayload;
+static uint8_t* g_mqttRxPresent = nullptr;
+static File g_mqttRxFile;
 static int g_mqttRxExpectedLen = 0;
+static int g_mqttRxReceivedLen = 0;
+static size_t g_mqttRxPresentBytes = 0;
+static int g_mqttRxMsgId = 0;
 
 static String prefString(const char* key, const char* fallback) {
     String value = g_prefs.getString(key, "");
@@ -1413,6 +1425,333 @@ static int jsonInt(cJSON* obj, const char* key, int fallback = 0) {
     return cJSON_IsNumber(item) ? item->valueint : fallback;
 }
 
+static int jsonHexNibble(char ch) {
+    if (ch >= '0' && ch <= '9') return ch - '0';
+    if (ch >= 'a' && ch <= 'f') return ch - 'a' + 10;
+    if (ch >= 'A' && ch <= 'F') return ch - 'A' + 10;
+    return -1;
+}
+
+static void appendUtf8Codepoint(String& out, uint32_t cp) {
+    if (cp <= 0x7F) {
+        out += (char)cp;
+    } else if (cp <= 0x7FF) {
+        out += (char)(0xC0 | (cp >> 6));
+        out += (char)(0x80 | (cp & 0x3F));
+    } else {
+        out += (char)(0xE0 | (cp >> 12));
+        out += (char)(0x80 | ((cp >> 6) & 0x3F));
+        out += (char)(0x80 | (cp & 0x3F));
+    }
+}
+
+static bool writeUtf8Codepoint(File& out, uint32_t cp, size_t& written) {
+    uint8_t bytes[3];
+    size_t len = 0;
+    if (cp <= 0x7F) {
+        bytes[len++] = (uint8_t)cp;
+    } else if (cp <= 0x7FF) {
+        bytes[len++] = (uint8_t)(0xC0 | (cp >> 6));
+        bytes[len++] = (uint8_t)(0x80 | (cp & 0x3F));
+    } else {
+        bytes[len++] = (uint8_t)(0xE0 | (cp >> 12));
+        bytes[len++] = (uint8_t)(0x80 | ((cp >> 6) & 0x3F));
+        bytes[len++] = (uint8_t)(0x80 | (cp & 0x3F));
+    }
+    if (out.write(bytes, len) != len) return false;
+    written += len;
+    return true;
+}
+
+static int jsonRawFieldStart(const String& json, const char* key) {
+    String needle = "\"" + String(key) + "\"";
+    int pos = json.indexOf(needle);
+    while (pos >= 0) {
+        int prev = pos - 1;
+        while (prev >= 0 && (json[prev] == ' ' || json[prev] == '\n' || json[prev] == '\r' || json[prev] == '\t')) prev--;
+        bool fieldBoundary = prev < 0 || json[prev] == '{' || json[prev] == ',';
+
+        int i = pos + needle.length();
+        while (i < (int)json.length() && (json[i] == ' ' || json[i] == '\n' || json[i] == '\r' || json[i] == '\t')) i++;
+        if (fieldBoundary && i < (int)json.length() && json[i] == ':') {
+            i++;
+            while (i < (int)json.length() && (json[i] == ' ' || json[i] == '\n' || json[i] == '\r' || json[i] == '\t')) i++;
+            return i;
+        }
+
+        pos = json.indexOf(needle, pos + 1);
+    }
+    return -1;
+}
+
+static bool jsonExtractStringField(const String& json, const char* key, String& out) {
+    int i = jsonRawFieldStart(json, key);
+    if (i < 0 || i >= (int)json.length() || json[i] != '"') return false;
+    i++;
+    out = "";
+
+    while (i < (int)json.length()) {
+        char ch = json[i++];
+        if (ch == '"') return true;
+        if (ch != '\\') {
+            out += ch;
+            continue;
+        }
+        if (i >= (int)json.length()) return false;
+        char esc = json[i++];
+        switch (esc) {
+            case '"': out += '"'; break;
+            case '\\': out += '\\'; break;
+            case '/': out += '/'; break;
+            case 'b': out += '\b'; break;
+            case 'f': out += '\f'; break;
+            case 'n': out += '\n'; break;
+            case 'r': out += '\r'; break;
+            case 't': out += '\t'; break;
+            case 'u': {
+                if (i + 4 > (int)json.length()) return false;
+                uint32_t cp = 0;
+                for (int n = 0; n < 4; n++) {
+                    int v = jsonHexNibble(json[i++]);
+                    if (v < 0) return false;
+                    cp = (cp << 4) | (uint32_t)v;
+                }
+                appendUtf8Codepoint(out, cp);
+                break;
+            }
+            default:
+                return false;
+        }
+    }
+    return false;
+}
+
+static int jsonExtractIntField(const String& json, const char* key, int fallback = 0) {
+    int i = jsonRawFieldStart(json, key);
+    if (i < 0 || i >= (int)json.length()) return fallback;
+    bool neg = false;
+    if (json[i] == '-') {
+        neg = true;
+        i++;
+    }
+    long value = 0;
+    bool any = false;
+    while (i < (int)json.length() && json[i] >= '0' && json[i] <= '9') {
+        any = true;
+        value = value * 10 + (json[i++] - '0');
+        if (value > INT32_MAX) return fallback;
+    }
+    if (!any) return fallback;
+    return neg ? -(int)value : (int)value;
+}
+
+static bool jsonFileSeekFieldValue(File& file, const char* key) {
+    if (!file.seek(0, SeekSet)) return false;
+    String needle = "\"" + String(key) + "\"";
+    int matched = 0;
+    while (file.available()) {
+        char ch = (char)file.read();
+        if (ch == needle[matched]) {
+            matched++;
+            if (matched == (int)needle.length()) {
+                do {
+                    if (!file.available()) return false;
+                    ch = (char)file.read();
+                } while (ch == ' ' || ch == '\n' || ch == '\r' || ch == '\t');
+                if (ch != ':') {
+                    matched = 0;
+                    continue;
+                }
+                do {
+                    if (!file.available()) return false;
+                    ch = (char)file.peek();
+                    if (ch == ' ' || ch == '\n' || ch == '\r' || ch == '\t') file.read();
+                } while (ch == ' ' || ch == '\n' || ch == '\r' || ch == '\t');
+                return true;
+            }
+        } else {
+            matched = (ch == needle[0]) ? 1 : 0;
+        }
+    }
+    return false;
+}
+
+static bool jsonExtractStringFieldFromFile(const char* path, const char* key, String& out, size_t maxLen = 1024) {
+    File file = SPIFFS.open(path, FILE_READ);
+    if (!file) return false;
+    if (!jsonFileSeekFieldValue(file, key) || file.read() != '"') {
+        file.close();
+        return false;
+    }
+    out = "";
+
+    while (file.available()) {
+        char ch = (char)file.read();
+        if (ch == '"') {
+            file.close();
+            return true;
+        }
+        if (ch != '\\') {
+            if (out.length() < maxLen) out += ch;
+            continue;
+        }
+        if (!file.available()) break;
+        char esc = (char)file.read();
+        char decoded = 0;
+        bool hasDecoded = true;
+        switch (esc) {
+            case '"': decoded = '"'; break;
+            case '\\': decoded = '\\'; break;
+            case '/': decoded = '/'; break;
+            case 'b': decoded = '\b'; break;
+            case 'f': decoded = '\f'; break;
+            case 'n': decoded = '\n'; break;
+            case 'r': decoded = '\r'; break;
+            case 't': decoded = '\t'; break;
+            case 'u': {
+                uint32_t cp = 0;
+                for (int n = 0; n < 4; n++) {
+                    if (!file.available()) {
+                        file.close();
+                        return false;
+                    }
+                    int v = jsonHexNibble((char)file.read());
+                    if (v < 0) {
+                        file.close();
+                        return false;
+                    }
+                    cp = (cp << 4) | (uint32_t)v;
+                }
+                if (out.length() < maxLen) appendUtf8Codepoint(out, cp);
+                hasDecoded = false;
+                break;
+            }
+            default:
+                file.close();
+                return false;
+        }
+        if (hasDecoded && out.length() < maxLen) out += decoded;
+    }
+    file.close();
+    return false;
+}
+
+static int jsonExtractIntFieldFromFile(const char* path, const char* key, int fallback = 0) {
+    File file = SPIFFS.open(path, FILE_READ);
+    if (!file) return fallback;
+    if (!jsonFileSeekFieldValue(file, key)) {
+        file.close();
+        return fallback;
+    }
+    bool neg = false;
+    int ch = file.peek();
+    if (ch == '-') {
+        neg = true;
+        file.read();
+    }
+    long value = 0;
+    bool any = false;
+    while (file.available()) {
+        ch = file.peek();
+        if (ch < '0' || ch > '9') break;
+        any = true;
+        value = value * 10 + (file.read() - '0');
+        if (value > INT32_MAX) {
+            file.close();
+            return fallback;
+        }
+    }
+    file.close();
+    if (!any) return fallback;
+    return neg ? -(int)value : (int)value;
+}
+
+static bool jsonExtractStringFieldToFile(const char* jsonPath, const char* key, const char* outPath, size_t& written) {
+    written = 0;
+    File in = SPIFFS.open(jsonPath, FILE_READ);
+    if (!in) return false;
+    if (!jsonFileSeekFieldValue(in, key) || in.read() != '"') {
+        in.close();
+        return false;
+    }
+
+    SPIFFS.remove(outPath);
+    File out = SPIFFS.open(outPath, FILE_WRITE);
+    if (!out) {
+        in.close();
+        return false;
+    }
+
+    while (in.available()) {
+        char ch = (char)in.read();
+        if (ch == '"') {
+            out.close();
+            in.close();
+            return true;
+        }
+        if (ch != '\\') {
+            if (out.write((const uint8_t*)&ch, 1) != 1) break;
+            written++;
+            continue;
+        }
+        if (!in.available()) break;
+        char esc = (char)in.read();
+        char decoded = 0;
+        bool writeChar = true;
+        switch (esc) {
+            case '"': decoded = '"'; break;
+            case '\\': decoded = '\\'; break;
+            case '/': decoded = '/'; break;
+            case 'b': decoded = '\b'; break;
+            case 'f': decoded = '\f'; break;
+            case 'n': decoded = '\n'; break;
+            case 'r': decoded = '\r'; break;
+            case 't': decoded = '\t'; break;
+            case 'u': {
+                uint32_t cp = 0;
+                for (int n = 0; n < 4; n++) {
+                    if (!in.available()) {
+                        out.close();
+                        in.close();
+                        SPIFFS.remove(outPath);
+                        return false;
+                    }
+                    int v = jsonHexNibble((char)in.read());
+                    if (v < 0) {
+                        out.close();
+                        in.close();
+                        SPIFFS.remove(outPath);
+                        return false;
+                    }
+                    cp = (cp << 4) | (uint32_t)v;
+                }
+                if (!writeUtf8Codepoint(out, cp, written)) {
+                    out.close();
+                    in.close();
+                    SPIFFS.remove(outPath);
+                    return false;
+                }
+                writeChar = false;
+                break;
+            }
+            default:
+                out.close();
+                in.close();
+                SPIFFS.remove(outPath);
+                return false;
+        }
+        if (writeChar) {
+            if (out.write((const uint8_t*)&decoded, 1) != 1) break;
+            written++;
+        }
+    }
+
+    out.close();
+    in.close();
+    SPIFFS.remove(outPath);
+    return false;
+}
+
 static uint64_t jsonUint64(cJSON* obj, const char* key, uint64_t fallback = 0) {
     cJSON* item = cJSON_GetObjectItemCaseSensitive(obj, key);
     if (cJSON_IsNumber(item)) return (uint64_t)item->valuedouble;
@@ -1585,25 +1924,81 @@ static void handleTransactionRequest(cJSON* root) {
     setLog("Transaction request received");
 }
 
-static void handleLuaRequest(cJSON* root) {
+static bool handleLuaRequestJson(const String& payload) {
     g_luaDisplayActive = false;
     g_forceFullRefresh = true;
-    g_luaPrompt.requestId = jsonString(root, "requestId");
-    g_luaPrompt.scriptId = jsonString(root, "scriptId");
-    g_luaPrompt.title = jsonString(root, "title");
-    g_luaPrompt.fileName = jsonString(root, "fileName");
-    g_luaPrompt.description = jsonString(root, "description");
-    g_luaPrompt.authorUsername = jsonString(root, "authorUsername");
-    g_luaPrompt.code = jsonString(root, "code");
-    g_luaPrompt.sizeBytes = jsonInt(root, "sizeBytes", g_luaPrompt.code.length());
+
+    g_luaPrompt.requestId = "";
+    g_luaPrompt.scriptId = "";
+    g_luaPrompt.title = "";
+    g_luaPrompt.fileName = "";
+    g_luaPrompt.description = "";
+    g_luaPrompt.authorUsername = "";
+    g_luaPrompt.downloadUrl = "";
+    g_luaPrompt.code = "";
+    g_luaPrompt.codePath = "";
+    g_luaPrompt.sizeBytes = jsonExtractIntField(payload, "sizeBytes", 0);
+    if (g_luaPrompt.sizeBytes > 0) g_luaPrompt.code.reserve((unsigned int)g_luaPrompt.sizeBytes + 1);
+
+    jsonExtractStringField(payload, "requestId", g_luaPrompt.requestId);
+    jsonExtractStringField(payload, "scriptId", g_luaPrompt.scriptId);
+    jsonExtractStringField(payload, "title", g_luaPrompt.title);
+    jsonExtractStringField(payload, "fileName", g_luaPrompt.fileName);
+    jsonExtractStringField(payload, "description", g_luaPrompt.description);
+    jsonExtractStringField(payload, "authorUsername", g_luaPrompt.authorUsername);
+    jsonExtractStringField(payload, "downloadUrl", g_luaPrompt.downloadUrl);
+    jsonExtractStringField(payload, "url", g_luaPrompt.downloadUrl);
+    if (!jsonExtractStringField(payload, "code", g_luaPrompt.code) && !g_luaPrompt.downloadUrl.length()) return false;
+    if (g_luaPrompt.sizeBytes <= 0) g_luaPrompt.sizeBytes = g_luaPrompt.code.length();
+
     g_luaPrompt.active = true;
     g_screen = SCREEN_LUA_PROMPT;
     setLog("Lua push received");
-    Serial.printf("[onion-os] Lua push: fileName=%s scriptId=%s codeLen=%d\n",
-        g_luaPrompt.fileName.c_str(), g_luaPrompt.scriptId.c_str(), g_luaPrompt.code.length());
-    Serial.println("[onion-os] Lua code:---");
-    Serial.println(g_luaPrompt.code);
-    Serial.println("[onion-os] ---end code");
+    Serial.printf("[onion-os] Lua push: fileName=%s scriptId=%s codeLen=%d jsonLen=%d\n",
+        g_luaPrompt.fileName.c_str(), g_luaPrompt.scriptId.c_str(),
+        g_luaPrompt.code.length(), payload.length());
+    return true;
+}
+
+static bool handleLuaRequestJsonFile(const char* payloadPath) {
+    g_luaDisplayActive = false;
+    g_forceFullRefresh = true;
+
+    g_luaPrompt.requestId = "";
+    g_luaPrompt.scriptId = "";
+    g_luaPrompt.title = "";
+    g_luaPrompt.fileName = "";
+    g_luaPrompt.description = "";
+    g_luaPrompt.authorUsername = "";
+    g_luaPrompt.downloadUrl = "";
+    g_luaPrompt.code = "";
+    g_luaPrompt.codePath = "";
+    g_luaPrompt.sizeBytes = jsonExtractIntFieldFromFile(payloadPath, "sizeBytes", 0);
+
+    jsonExtractStringFieldFromFile(payloadPath, "requestId", g_luaPrompt.requestId, 128);
+    jsonExtractStringFieldFromFile(payloadPath, "scriptId", g_luaPrompt.scriptId, 128);
+    jsonExtractStringFieldFromFile(payloadPath, "title", g_luaPrompt.title, 96);
+    jsonExtractStringFieldFromFile(payloadPath, "fileName", g_luaPrompt.fileName, 96);
+    jsonExtractStringFieldFromFile(payloadPath, "description", g_luaPrompt.description, 500);
+    jsonExtractStringFieldFromFile(payloadPath, "authorUsername", g_luaPrompt.authorUsername, 64);
+    jsonExtractStringFieldFromFile(payloadPath, "downloadUrl", g_luaPrompt.downloadUrl, 256);
+    if (!g_luaPrompt.downloadUrl.length()) jsonExtractStringFieldFromFile(payloadPath, "url", g_luaPrompt.downloadUrl, 256);
+
+    size_t codeBytes = 0;
+    bool hasCode = jsonExtractStringFieldToFile(payloadPath, "code", LUA_PUSH_TEMP_PATH, codeBytes);
+    if (!hasCode && !g_luaPrompt.downloadUrl.length()) return false;
+    if (g_luaPrompt.sizeBytes <= 0) g_luaPrompt.sizeBytes = (int)codeBytes;
+    g_luaPrompt.codePath = hasCode ? LUA_PUSH_TEMP_PATH : "";
+    g_luaPrompt.active = true;
+    g_screen = SCREEN_LUA_PROMPT;
+    setLog("Lua push received");
+    File payloadFile = SPIFFS.open(payloadPath, FILE_READ);
+    int payloadLen = payloadFile ? payloadFile.size() : 0;
+    if (payloadFile) payloadFile.close();
+    Serial.printf("[onion-os] Lua push file-backed: fileName=%s scriptId=%s codeLen=%d jsonLen=%d\n",
+        g_luaPrompt.fileName.c_str(), g_luaPrompt.scriptId.c_str(),
+        (int)codeBytes, payloadLen);
+    return true;
 }
 
 static void handleMqttPayload(const String& incomingTopic, const String& payload) {
@@ -1612,6 +2007,11 @@ static void handleMqttPayload(const String& incomingTopic, const String& payload
         incomingTopic.endsWith("/transaction/request") ||
         incomingTopic.endsWith("/lua/request");
     if (!isControlTopic) return;
+
+    if (incomingTopic.endsWith("/lua/request")) {
+        if (!handleLuaRequestJson(payload)) setLog("Bad MQTT JSON");
+        return;
+    }
 
     cJSON* root = cJSON_Parse(payload.c_str());
     if (!root) {
@@ -1627,8 +2027,6 @@ static void handleMqttPayload(const String& incomingTopic, const String& payload
         handleLinkRequest(root);
     } else if (incomingTopic.endsWith("/transaction/request")) {
         handleTransactionRequest(root);
-    } else if (incomingTopic.endsWith("/lua/request")) {
-        handleLuaRequest(root);
     }
 
     cJSON_Delete(root);
@@ -1726,10 +2124,85 @@ static void processMqttMessage(const String& incomingTopic, const String& payloa
     handleMqttPayload(incomingTopic, payload);
 }
 
+static void processMqttMessageFile(const String& incomingTopic, const char* payloadPath) {
+    if (incomingTopic.endsWith("/lua/request")) {
+        if (!handleLuaRequestJsonFile(payloadPath)) setLog("Bad MQTT JSON");
+        return;
+    }
+
+    File file = SPIFFS.open(payloadPath, FILE_READ);
+    if (!file) {
+        setLog("Bad MQTT JSON");
+        return;
+    }
+    String payload;
+    if (!payload.reserve(file.size() + 1)) {
+        file.close();
+        setLog("MQTT alloc failed");
+        return;
+    }
+    while (file.available()) payload += (char)file.read();
+    file.close();
+    processMqttMessage(incomingTopic, payload);
+}
+
 static void resetMqttFragmentBuffer() {
     g_mqttRxTopic = "";
-    g_mqttRxPayload = "";
+    if (g_mqttRxFile) g_mqttRxFile.close();
+    if (g_mqttRxPresent) {
+        free(g_mqttRxPresent);
+        g_mqttRxPresent = nullptr;
+    }
+    SPIFFS.remove(MQTT_RX_TEMP_JSON_PATH);
     g_mqttRxExpectedLen = 0;
+    g_mqttRxReceivedLen = 0;
+    g_mqttRxPresentBytes = 0;
+    g_mqttRxMsgId = 0;
+}
+
+static bool mqttFragmentBytePresent(int idx) {
+    return (g_mqttRxPresent[(size_t)idx >> 3] & (1 << (idx & 7))) != 0;
+}
+
+static void markMqttFragmentBytePresent(int idx) {
+    g_mqttRxPresent[(size_t)idx >> 3] |= (1 << (idx & 7));
+}
+
+static bool beginMqttFragmentBuffer(const String& incomingTopic, int totalLen, int msgId) {
+    resetMqttFragmentBuffer();
+    g_mqttRxTopic = incomingTopic;
+    g_mqttRxExpectedLen = totalLen;
+    g_mqttRxReceivedLen = 0;
+    g_mqttRxMsgId = msgId;
+
+    g_mqttRxPresentBytes = ((size_t)totalLen + 7) / 8;
+    g_mqttRxPresent = (uint8_t*)heap_caps_calloc(g_mqttRxPresentBytes, 1, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!g_mqttRxPresent) g_mqttRxPresent = (uint8_t*)heap_caps_calloc(g_mqttRxPresentBytes, 1, MALLOC_CAP_8BIT);
+    SPIFFS.remove(MQTT_RX_TEMP_JSON_PATH);
+    g_mqttRxFile = SPIFFS.open(MQTT_RX_TEMP_JSON_PATH, FILE_WRITE);
+
+    if (!g_mqttRxFile || !g_mqttRxPresent) {
+        resetMqttFragmentBuffer();
+        setLog("MQTT alloc failed");
+        return false;
+    }
+    return true;
+}
+
+static bool ensureMqttRxFileSize(size_t size) {
+    if (!g_mqttRxFile) return false;
+    size_t current = g_mqttRxFile.size();
+    if (current >= size) return true;
+    if (!g_mqttRxFile.seek(current, SeekSet)) return false;
+
+    uint8_t zeros[64] = {};
+    while (current < size) {
+        size_t n = size - current;
+        if (n > sizeof(zeros)) n = sizeof(zeros);
+        if (g_mqttRxFile.write(zeros, n) != n) return false;
+        current += n;
+    }
+    return true;
 }
 
 static void processMqttEventData(esp_mqtt_event_handle_t event) {
@@ -1742,6 +2215,13 @@ static void processMqttEventData(esp_mqtt_event_handle_t event) {
 
     int totalLen = event->total_data_len > 0 ? event->total_data_len : event->data_len;
     int offset = event->current_data_offset;
+    if (offset < 0 || event->data_len < 0 || totalLen < event->data_len) {
+        resetMqttFragmentBuffer();
+        setLog("Bad MQTT fragment");
+        Serial.printf("[onion-os] Bad MQTT fragment: msg=%d off=%d len=%d total=%d got=%d\n",
+            event->msg_id, offset, event->data_len, totalLen, g_mqttRxReceivedLen);
+        return;
+    }
     if (totalLen > MQTT_RX_MAX_BYTES) {
         resetMqttFragmentBuffer();
         setLog("MQTT payload too large");
@@ -1755,29 +2235,48 @@ static void processMqttEventData(esp_mqtt_event_handle_t event) {
     }
 
     if (offset == 0) {
-        resetMqttFragmentBuffer();
-        g_mqttRxTopic = incomingTopic;
-        g_mqttRxExpectedLen = totalLen;
-        g_mqttRxPayload.reserve((unsigned int)totalLen);
-    } else if (!g_mqttRxExpectedLen || offset != (int)g_mqttRxPayload.length()) {
+        if (!beginMqttFragmentBuffer(incomingTopic, totalLen, event->msg_id)) return;
+    } else if (!g_mqttRxExpectedLen || (g_mqttRxMsgId && event->msg_id && event->msg_id != g_mqttRxMsgId)) {
         resetMqttFragmentBuffer();
         setLog("Bad MQTT fragment");
+        Serial.printf("[onion-os] Bad MQTT fragment: msg=%d off=%d len=%d total=%d got=%d\n",
+            event->msg_id, offset, event->data_len, totalLen, g_mqttRxReceivedLen);
         return;
     } else if (incomingTopic.length() && g_mqttRxTopic.length() && incomingTopic != g_mqttRxTopic) {
         resetMqttFragmentBuffer();
         setLog("Bad MQTT fragment");
+        Serial.printf("[onion-os] Bad MQTT fragment topic: msg=%d off=%d len=%d total=%d got=%d\n",
+            event->msg_id, offset, event->data_len, totalLen, g_mqttRxReceivedLen);
         return;
     }
 
-    g_mqttRxPayload += payloadChunk;
-    if ((int)g_mqttRxPayload.length() < g_mqttRxExpectedLen) return;
-    if ((int)g_mqttRxPayload.length() > g_mqttRxExpectedLen) {
+    if (offset + event->data_len > g_mqttRxExpectedLen) {
         resetMqttFragmentBuffer();
         setLog("Bad MQTT fragment");
+        Serial.printf("[onion-os] Bad MQTT fragment overflow: msg=%d off=%d len=%d total=%d got=%d\n",
+            event->msg_id, offset, event->data_len, totalLen, g_mqttRxReceivedLen);
         return;
     }
 
-    processMqttMessage(g_mqttRxTopic, g_mqttRxPayload);
+    if (!ensureMqttRxFileSize((size_t)offset) ||
+        !g_mqttRxFile.seek(offset, SeekSet) ||
+        g_mqttRxFile.write((const uint8_t*)event->data, event->data_len) != (size_t)event->data_len) {
+        resetMqttFragmentBuffer();
+        setLog("MQTT write failed");
+        return;
+    }
+    for (int i = 0; i < event->data_len; i++) {
+        int idx = offset + i;
+        if (!mqttFragmentBytePresent(idx)) {
+            markMqttFragmentBytePresent(idx);
+            g_mqttRxReceivedLen++;
+        }
+    }
+
+    if (g_mqttRxReceivedLen < g_mqttRxExpectedLen) return;
+
+    if (g_mqttRxFile) g_mqttRxFile.close();
+    processMqttMessageFile(g_mqttRxTopic, MQTT_RX_TEMP_JSON_PATH);
     resetMqttFragmentBuffer();
 }
 
@@ -1813,6 +2312,8 @@ static void ensureMqtt() {
         cfg.broker.address.uri = g_config.mqttUri.c_str();
         cfg.credentials.username = g_config.mqttUsername.length() ? g_config.mqttUsername.c_str() : nullptr;
         cfg.credentials.authentication.password = g_config.mqttPassword.length() ? g_config.mqttPassword.c_str() : nullptr;
+        cfg.buffer.size = MQTT_CLIENT_BUFFER_BYTES;
+        cfg.buffer.out_size = MQTT_CLIENT_OUT_BUFFER_BYTES;
         g_mqtt = esp_mqtt_client_init(&cfg);
         esp_mqtt_client_register_event(g_mqtt, MQTT_EVENT_ANY, mqttEventHandler, nullptr);
         esp_mqtt_client_start(g_mqtt);
@@ -2152,6 +2653,14 @@ static bool downloadScriptFile(const String& url, const String& path) {
 
 static bool downloadImageFile(const String& url, const String& path) {
     return downloadFile(url, path, MAX_IMAGE_BYTES, "Image");
+}
+
+static String resolveServerUrl(const String& url) {
+    if (url.startsWith("http://") || url.startsWith("https://")) return url;
+    String base = g_config.serverBaseUrl;
+    if (base.endsWith("/")) base.remove(base.length() - 1);
+    if (url.startsWith("/")) return base + url;
+    return base + "/" + url;
 }
 
 struct LoadedBitmap {
@@ -4292,35 +4801,42 @@ static void registerOnionLua(lua_State* L) {
     lua_setglobal(L, "onion");
 }
 
-static bool runLuaSource(const String& source, const String& name) {
-    lua_State* L = luaL_newstate();
-    if (!L) {
-        setLog("Lua state failed");
-        return false;
+static void* luaHeapAllocator(void*, void* ptr, size_t, size_t nsize) {
+    if (nsize == 0) {
+        heap_caps_free(ptr);
+        return nullptr;
     }
-    luaL_openlibs(L);
-    registerOnionLua(L);
+    void* out = heap_caps_realloc(ptr, nsize, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!out) out = heap_caps_realloc(ptr, nsize, MALLOC_CAP_8BIT);
+    return out;
+}
 
-    String logBeforeRun = g_log;
-    int status = luaL_loadbuffer(L, source.c_str(), source.length(), name.c_str());
+static lua_State* newLuaState() {
+    return lua_newstate(luaHeapAllocator, nullptr, esp_random());
+}
+
+static void cleanupLuaRuntime() {
+    luaMqttResetSubs();
+    moduleShutdownActive();
+    if (g_luaFramePending) { g_luaFramePending = false; refreshLuaCanvas(); }
+    g_luaDeferFlush = false;
+}
+
+static bool finishLuaRun(lua_State* L, const String& name, int status, const String& logBeforeRun) {
     if (status == LUA_OK) status = lua_pcall(L, 0, 0, 0);
     if (status != LUA_OK) {
-        String err = lua_tostring(L, -1);
+        const char* luaErr = lua_tostring(L, -1);
+        String err = luaErr ? String(luaErr) : String("unknown Lua error");
+        g_lastLuaError = err;
         lua_close(L);
-        luaMqttResetSubs();
-        moduleShutdownActive();
-        if (g_luaFramePending) { g_luaFramePending = false; refreshLuaCanvas(); }
-        g_luaDeferFlush = false;
+        cleanupLuaRuntime();
         Serial.printf("[onion-os] Lua error in %s: %s\n", name.c_str(), err.c_str());
         setLog("Lua error: " + clipped(err, 22));
         return false;
     }
 
     lua_close(L);
-    luaMqttResetSubs();
-    moduleShutdownActive();
-    if (g_luaFramePending) { g_luaFramePending = false; refreshLuaCanvas(); }
-    g_luaDeferFlush = false;
+    cleanupLuaRuntime();
     if (g_luaDisplayActive) {
         Serial.printf("[onion-os] Lua ran %s\n", name.c_str());
     } else {
@@ -4329,22 +4845,74 @@ static bool runLuaSource(const String& source, const String& name) {
     return true;
 }
 
-static void runStoredScript(const String& path) {
+static bool prepareLuaState(lua_State*& L) {
+    L = newLuaState();
+    if (!L) {
+        g_lastLuaError = "Lua state failed";
+        setLog("Lua state failed");
+        return false;
+    }
+    luaL_openlibs(L);
+    registerOnionLua(L);
+    return true;
+}
+
+static bool runLuaSource(const String& source, const String& name) {
+    g_lastLuaError = "";
+    lua_State* L = nullptr;
+    if (!prepareLuaState(L)) return false;
+    String logBeforeRun = g_log;
+    int status = luaL_loadbuffer(L, source.c_str(), source.length(), name.c_str());
+    return finishLuaRun(L, name, status, logBeforeRun);
+}
+
+struct LuaFileReader {
+    File* file;
+    char buffer[512];
+};
+
+static const char* luaFileReader(lua_State*, void* data, size_t* size) {
+    LuaFileReader* reader = (LuaFileReader*)data;
+    if (!reader || !reader->file || !*reader->file) {
+        *size = 0;
+        return nullptr;
+    }
+    size_t n = reader->file->read((uint8_t*)reader->buffer, sizeof(reader->buffer));
+    if (n == 0) {
+        *size = 0;
+        return nullptr;
+    }
+    *size = n;
+    return reader->buffer;
+}
+
+static bool runStoredScript(const String& path) {
+    g_lastLuaError = "";
     File file = SPIFFS.open(path, FILE_READ);
     if (!file) {
+        g_lastLuaError = "Lua script missing: " + path;
         setLog("Lua script missing");
-        return;
+        return false;
     }
     if (file.size() > MAX_SCRIPT_BYTES) {
+        size_t scriptSize = file.size();
         file.close();
+        g_lastLuaError = "Lua script too large: " + String(scriptSize) + " bytes";
         setLog("Lua script too large");
-        return;
+        return false;
     }
-    String source;
-    source.reserve(file.size());
-    while (file.available()) source += (char)file.read();
+
+    lua_State* L = nullptr;
+    if (!prepareLuaState(L)) {
+        file.close();
+        return false;
+    }
+
+    String logBeforeRun = g_log;
+    LuaFileReader reader = {&file, {}};
+    int status = lua_load(L, luaFileReader, &reader, path.c_str(), nullptr);
     file.close();
-    runLuaSource(source, path);
+    return finishLuaRun(L, path, status, logBeforeRun);
 }
 
 static void runScriptByName(const String& name) {
@@ -4401,22 +4969,117 @@ static String pushedScriptFileName() {
     return "pushed_" + safe + ".lua";
 }
 
+static bool copySpiffsFile(const String& srcPath, const String& dstPath) {
+    File src = SPIFFS.open(srcPath, FILE_READ);
+    if (!src) return false;
+    SPIFFS.remove(dstPath);
+    File dst = SPIFFS.open(dstPath, FILE_WRITE);
+    if (!dst) {
+        src.close();
+        return false;
+    }
+    uint8_t buf[512];
+    bool ok = true;
+    while (src.available()) {
+        size_t n = src.read(buf, sizeof(buf));
+        if (n == 0) break;
+        if (dst.write(buf, n) != n) {
+            ok = false;
+            break;
+        }
+    }
+    src.close();
+    dst.close();
+    if (!ok) SPIFFS.remove(dstPath);
+    return ok;
+}
+
+static bool stringIsDigits(const String& value) {
+    if (!value.length()) return false;
+    for (size_t i = 0; i < value.length(); i++) {
+        if (value[i] < '0' || value[i] > '9') return false;
+    }
+    return true;
+}
+
+static String luaInstallError() {
+    if (!g_lastLuaError.length()) return "Lua runtime error";
+
+    int firstColon = g_lastLuaError.indexOf(':');
+    int secondColon = firstColon >= 0 ? g_lastLuaError.indexOf(':', firstColon + 1) : -1;
+    if (firstColon >= 0 && secondColon > firstColon) {
+        String line = g_lastLuaError.substring(firstColon + 1, secondColon);
+        if (stringIsDigits(line)) {
+            String message = g_lastLuaError.substring(secondColon + 1);
+            message.trim();
+            return "Lua line " + line + ": " + clipped(message, 160);
+        }
+    }
+
+    return "Lua: " + clipped(g_lastLuaError, 180);
+}
+
 static bool installAndRunPushedScript(String& error) {
     if (!g_luaPrompt.requestId.length()) {
         error = "Missing Lua request";
         return false;
     }
-    if (!g_luaPrompt.code.length()) {
+    bool fileBacked = g_luaPrompt.codePath.length() > 0;
+    bool httpBacked = g_luaPrompt.downloadUrl.length() > 0;
+    if (!httpBacked && !fileBacked && !g_luaPrompt.code.length()) {
         error = "Empty Lua script";
         return false;
     }
-    if (g_luaPrompt.code.length() > MAX_SCRIPT_BYTES || g_luaPrompt.sizeBytes > MAX_SCRIPT_BYTES) {
+    if ((!httpBacked && !fileBacked && g_luaPrompt.code.length() > MAX_SCRIPT_BYTES) ||
+        g_luaPrompt.sizeBytes > MAX_SCRIPT_BYTES) {
         error = "Lua script too large";
         return false;
     }
 
     String name = pushedScriptFileName();
     String path = "/scripts_" + name;
+    if (httpBacked) {
+        String url = resolveServerUrl(g_luaPrompt.downloadUrl);
+        SPIFFS.remove(path);
+        if (!downloadScriptFile(url, path)) {
+            error = "Lua download failed";
+            return false;
+        }
+        if (!runStoredScript(path)) {
+            error = luaInstallError();
+            return false;
+        }
+        return true;
+    }
+
+    if (fileBacked) {
+        File src = SPIFFS.open(g_luaPrompt.codePath, FILE_READ);
+        if (!src) {
+            error = "Lua script missing";
+            return false;
+        }
+        size_t scriptSize = src.size();
+        src.close();
+        if (scriptSize == 0) {
+            error = "Empty Lua script";
+            return false;
+        }
+        if (scriptSize > MAX_SCRIPT_BYTES) {
+            error = "Lua script too large";
+            return false;
+        }
+        SPIFFS.remove(path);
+        if (!SPIFFS.rename(g_luaPrompt.codePath, path) && !copySpiffsFile(g_luaPrompt.codePath, path)) {
+            error = "Lua write failed";
+            return false;
+        }
+        if (!runStoredScript(path)) {
+            error = luaInstallError();
+            return false;
+        }
+        return true;
+    }
+
     File file = SPIFFS.open(path, FILE_WRITE);
     if (!file) {
         error = "Lua write failed";
@@ -4431,7 +5094,7 @@ static bool installAndRunPushedScript(String& error) {
     }
 
     if (!runLuaSource(g_luaPrompt.code, name)) {
-        error = "Lua runtime error";
+        error = luaInstallError();
         return false;
     }
     return true;
@@ -4462,9 +5125,14 @@ static bool sendLuaPushResponse(bool approved) {
     String response;
     int code = sentOverMqtt ? 200 : httpPostJson("/api/badge/lua-response", body, &response);
     if (code >= 200 && code < 300) {
-        setLog(accepted ? "Lua installed" : "Lua denied");
+        setLog(accepted ? "Lua installed" : (error.length() ? error : "Lua denied"));
         g_luaPrompt.active = false;
         g_luaPrompt.code = "";
+        g_luaPrompt.downloadUrl = "";
+        if (g_luaPrompt.codePath.length()) {
+            SPIFFS.remove(g_luaPrompt.codePath);
+            g_luaPrompt.codePath = "";
+        }
         g_screen = SCREEN_STATUS;
     } else {
         setLog("Lua response HTTP " + String(code));

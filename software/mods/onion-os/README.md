@@ -436,5 +436,15 @@ deleted accidentally.
 Set `IDF_EXPORT=/path/to/esp-idf/export.sh` if your ESP-IDF install is not in a
 common location.
 
+To monitor logs without flashing, use the serial monitor helper. It scans common
+USB serial ports, labels detected ESP board types, prompts for a device, and
+then runs `idf.py monitor`:
+
+```sh
+scripts/monitor-serial.sh
+scripts/monitor-serial.sh --port /dev/cu.usbserial-210
+scripts/monitor-serial.sh --board any --list
+```
+
 The project uses the same 8 MB flash / OPI PSRAM defaults as the existing badge
 mods.
