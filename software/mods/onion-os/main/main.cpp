@@ -30,6 +30,7 @@ extern "C" {
 #include <Fonts/FreeMonoBold18pt7b.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
@@ -130,6 +131,15 @@ GxEPD2_BW<GxEPD2_270_GDEY027T91, GxEPD2_270_GDEY027T91::HEIGHT> display(
 );
 static GFXcanvas1 g_luaCanvas(ONION_DISPLAY_WIDTH, ONION_DISPLAY_HEIGHT);
 
+// UI framebuffer — all screen draw functions render here; flushFrame() decides
+// whether to push a partial or full refresh to the e-ink panel.
+static GFXcanvas1 g_frame(ONION_DISPLAY_WIDTH, ONION_DISPLAY_HEIGHT);
+static const int FRAME_BPR   = (ONION_DISPLAY_WIDTH + 7) / 8;   // bytes per row = 33
+static const int FRAME_BYTES = FRAME_BPR * ONION_DISPLAY_HEIGHT; // 5808
+static uint8_t   g_prevFrame[FRAME_BPR * ONION_DISPLAY_HEIGHT];  // last flushed snapshot
+static uint16_t  g_partialCount    = 0;
+static bool      g_forceFullRefresh = true;   // first flush is always full
+
 enum Screen : uint8_t {
     SCREEN_BOOT_SPLASH,
     SCREEN_STATUS,
@@ -138,12 +148,20 @@ enum Screen : uint8_t {
     SCREEN_TX_PROMPT,
     SCREEN_LUA_PROMPT,
     SCREEN_LOG,
+    SCREEN_SETTINGS,
+    SCREEN_WIFI_OVERVIEW,
+    SCREEN_WIFI_SCANNING,
+    SCREEN_WIFI_LIST,
+    SCREEN_WIFI_PASSWORD,
+    SCREEN_WIFI_CONNECTING,
+    SCREEN_WIFI_RESULT,
 };
 
 enum HomeItem : int {
     HOME_ITEM_SCRIPTS,
     HOME_ITEM_SYNC,
     HOME_ITEM_REFRESH,
+    HOME_ITEM_SETTINGS,
     HOME_ITEM_COUNT,
 };
 
@@ -205,11 +223,14 @@ static LuaScriptPrompt g_luaPrompt;
 static Preferences g_prefs;
 static esp_mqtt_client_handle_t g_mqtt = nullptr;
 static bool g_mqttConnected = false;
-static Screen g_screen = SCREEN_BOOT_SPLASH;
+static Screen g_screen     = SCREEN_BOOT_SPLASH;
+static Screen g_lastScreen = SCREEN_BOOT_SPLASH; // last screen rendered; drives full-refresh on change
 static bool g_needsRedraw = true;
 static uint8_t g_lastButtons = 0;
+static uint32_t g_lastButtonPoll = 0;
 static uint32_t g_lastHandshake = 0;
 static uint32_t g_lastMqttAttempt = 0;
+static uint32_t g_lastWifiAttempt = 0;
 static uint32_t g_mqttHandshakeSentAt = 0;
 static bool g_mqttHandshakePending = false;
 static String g_log = "Booting";
@@ -225,6 +246,54 @@ static int g_batteryVoltageMv = 0;
 static int g_batteryDisplayedPercent = -1;
 static uint32_t g_lastBatterySample = 0;
 #endif
+
+// ── WiFi setup state ─────────────────────────────────────────────────────────
+struct WifiNetwork {
+    char ssid[33];
+    int8_t rssi;
+    bool secured;
+};
+static std::vector<WifiNetwork> g_wifiNetworks;
+static int g_wifiListSel = 0;
+static String g_wifiConnectSsid;
+static char g_wifiPassBuf[65] = {};
+static int g_wifiPassLen = 0;
+static int g_settingsSel = 0;
+static int g_wifiOverviewSel = 0;
+static String g_wifiResultMsg;
+
+#define WIFI_WORKER_IDLE    0
+#define WIFI_WORKER_RUNNING 1
+#define WIFI_WORKER_DONE    2
+#define WIFI_WORKER_FAILED  3
+static std::atomic<int> g_wifiWorkerResult(WIFI_WORKER_IDLE);
+
+// Full QWERTY keyboard: 5 char rows + 1 control row (row 5)
+static const char* kKbNormal[5] = {
+    "1234567890",
+    "qwertyuiop",
+    "asdfghjkl",
+    "zxcvbnm",
+    "!@#$%&*-_=+.",
+};
+static const char* kKbCaps[5] = {
+    "1234567890",
+    "QWERTYUIOP",
+    "ASDFGHJKL",
+    "ZXCVBNM",
+    "!@#$%&*-_=+.",
+};
+static const int kKbTotalRows = 6; // 5 char rows + 1 control row
+static int g_kbRow = 0;
+static int g_kbCol = 0;
+static bool g_kbCaps = false;
+
+struct WifiConnectArgs {
+    char ssid[33];
+    char pass[65];
+};
+static WifiConnectArgs g_wifiConnectArgs;
+// ─────────────────────────────────────────────────────────────────────────────
 
 static const int kLuaReadableGpios[] = {48, 47, 19, 42, 41, 40, 38, 39, 16, 15, 7, 6, 5, 4};
 
@@ -306,8 +375,8 @@ static String generateHardwareId() {
 
 static void loadConfig() {
     g_prefs.begin("onion-os", false);
-    g_config.wifiSsid = ONION_HARDCODED_WIFI_SSID;
-    g_config.wifiPassword = ONION_HARDCODED_WIFI_PASSWORD;
+    g_config.wifiSsid = prefString("wifi_ssid", ONION_HARDCODED_WIFI_SSID);
+    g_config.wifiPassword = prefString("wifi_pass", ONION_HARDCODED_WIFI_PASSWORD);
     g_config.serverBaseUrl = ONION_HARDCODED_SERVER_BASE_URL;
     g_config.badgeApiKey = prefString("api_key", ONION_DEFAULT_BADGE_API_KEY);
     g_config.mqttUri = ONION_HARDCODED_MQTT_URI;
@@ -685,10 +754,10 @@ static uint8_t readButtons() {
 }
 
 static void printLine(const char* text, int y, const GFXfont* font = &FreeMono9pt7b) {
-    display.setFont(font);
-    display.setTextColor(GxEPD_BLACK);
-    display.setCursor(6, y);
-    display.print(text);
+    g_frame.setFont(font);
+    g_frame.setTextColor(GxEPD_BLACK);
+    g_frame.setCursor(6, y);
+    g_frame.print(text);
 }
 
 static void printString(const String& text, int y, const GFXfont* font = &FreeMono9pt7b) {
@@ -811,8 +880,10 @@ static void refreshScriptList() {
     File file = root.openNextFile();
     while (file) {
         String name = file.name();
-        if (!file.isDirectory() && name.startsWith("/scripts_") && name.endsWith(".lua")) {
-            g_scripts.push_back(name);
+        if (!file.isDirectory() &&
+            (name.startsWith("/scripts_") || name.startsWith("scripts_")) &&
+            name.endsWith(".lua")) {
+            g_scripts.push_back(name.startsWith("/") ? name : "/" + name);
         }
         file = root.openNextFile();
     }
@@ -824,10 +895,10 @@ static void refreshScriptList() {
 }
 
 static void drawBootSplash() {
-    display.fillScreen(GxEPD_WHITE);
-    int x = (display.width() - ONION_LOGO_WIDTH) / 2;
-    int y = (display.height() - ONION_LOGO_HEIGHT) / 2;
-    display.drawBitmap(x, y, ONION_LOGO_BLACK_BITMAP, ONION_LOGO_WIDTH, ONION_LOGO_HEIGHT, GxEPD_BLACK);
+    g_frame.fillScreen(GxEPD_WHITE);
+    int x = (ONION_DISPLAY_WIDTH  - ONION_LOGO_WIDTH)  / 2;
+    int y = (ONION_DISPLAY_HEIGHT - ONION_LOGO_HEIGHT) / 2;
+    g_frame.drawBitmap(x, y, ONION_LOGO_BLACK_BITMAP, ONION_LOGO_WIDTH, ONION_LOGO_HEIGHT, GxEPD_BLACK);
 }
 
 static void drawHomeItem(HomeItem item, const String& label, int y) {
@@ -836,27 +907,26 @@ static void drawHomeItem(HomeItem item, const String& label, int y) {
 }
 
 static void drawStatus() {
-    display.fillScreen(GxEPD_WHITE);
+    g_frame.fillScreen(GxEPD_WHITE);
     printLine("ONION OS", 22, &FreeMonoBold18pt7b);
     String user = g_identity.username.length() ? g_identity.username : (g_identity.linked ? "linked" : "not linked");
     printString("User: " + clipped(user, 21), 48, &FreeMonoBold9pt7b);
     printString("Onions: " + clipped(g_identity.onionCount, 18), 66);
     printString(batteryStatusText(), 84);
     printString("ID: " + String(g_identity.onionId ? String(g_identity.onionId) : "pending") +
-        "  " + String(g_mqttConnected ? "MQTT" : (WiFi.status() == WL_CONNECTED ? "WiFi" : "offline")), 102);
-    drawHomeItem(HOME_ITEM_SCRIPTS, "Scripts Explorer", 122);
-    drawHomeItem(HOME_ITEM_SYNC, "Sync Scripts", 140);
-    drawHomeItem(HOME_ITEM_REFRESH, "Refresh Profile", 158);
-    printString(clipped(g_log, 30), 172);
+        "  " + String(g_mqttConnected ? "MQTT" : (WiFi.status() == WL_CONNECTED ? "WiFi" : "offline")), 88);
+    drawHomeItem(HOME_ITEM_SCRIPTS, "Scripts Explorer", 100);
+    drawHomeItem(HOME_ITEM_SYNC, "Sync Scripts", 116);
+    drawHomeItem(HOME_ITEM_REFRESH, "Refresh Profile", 132);
+    drawHomeItem(HOME_ITEM_SETTINGS, "Settings", 148);
+    printString(clipped(g_log, 30), 168);
 }
 
 static void drawScriptExplorer() {
-    display.fillScreen(GxEPD_WHITE);
+    g_frame.fillScreen(GxEPD_WHITE);
     printLine("SCRIPTS", 22, &FreeMonoBold18pt7b);
     if (g_scripts.empty()) {
         printString("No scripts installed", 58, &FreeMonoBold9pt7b);
-        printString("RIGHT = sync", 96);
-        printString("CANCEL = home", 116);
         return;
     }
 
@@ -869,60 +939,132 @@ static void drawScriptExplorer() {
         printString(prefix + clipped(storedScriptDisplayName(g_scripts[idx]), 24), 52 + row * 20,
             idx == g_scriptSelection ? &FreeMonoBold9pt7b : &FreeMono9pt7b);
     }
-    printString("SELECT run LEFT delete", 146);
-    printString("RIGHT sync CANCEL home", 166);
 }
 
 static void drawLinkPrompt() {
-    display.fillScreen(GxEPD_WHITE);
+    g_frame.fillScreen(GxEPD_WHITE);
     printLine("LINK BADGE?", 24, &FreeMonoBold18pt7b);
     printString("User:", 54, &FreeMonoBold9pt7b);
     printString(clipped(g_linkPrompt.username, 22), 74);
-    printString("SELECT = approve", 112);
-    printString("CANCEL = deny", 132);
-    printString("Wallet: " + String(g_identity.solanaPublicKey.length() ? "ready" : "create on approve"), 160);
+    printString("Wallet: " + String(g_identity.solanaPublicKey.length() ? "ready" : "create on approve"), 112);
 }
 
 static void drawTransactionPrompt() {
-    display.fillScreen(GxEPD_WHITE);
+    g_frame.fillScreen(GxEPD_WHITE);
     printLine("SIGN ONIONS?", 24, &FreeMonoBold18pt7b);
     printString("Type: " + clipped(g_txPrompt.type, 18), 54);
     printString("Amount: " + String(g_txPrompt.amount), 74);
-    printString("SELECT = sign/approve", 112);
-    printString("CANCEL = deny", 132);
-    printString("Signer: Ed25519 + ATECC", 160);
+    printString("Signer: Ed25519 + ATECC", 112);
 }
 
 static void drawLuaPrompt() {
-    display.fillScreen(GxEPD_WHITE);
+    g_frame.fillScreen(GxEPD_WHITE);
     printLine("INSTALL LUA?", 24, &FreeMonoBold18pt7b);
     printString(clipped(g_luaPrompt.title.length() ? g_luaPrompt.title : g_luaPrompt.fileName, 24), 54, &FreeMonoBold9pt7b);
     printString("By: " + clipped(g_luaPrompt.authorUsername, 18), 76);
     printString(clipped(g_luaPrompt.description, 28), 96);
     printString("Size: " + String(g_luaPrompt.sizeBytes) + " bytes", 116);
-    printString("SELECT = install/run", 146);
-    printString("CANCEL = deny", 166);
+}
+
+// Forward declarations for WiFi screens (defined after ensureWifi)
+static void drawSettingsScreen();
+static void drawWifiOverview();
+static void drawWifiScanning();
+static void drawWifiList();
+static void drawWifiPassword();
+static void drawWifiConnecting();
+static void drawWifiResult();
+
+// Push g_frame to the e-ink panel using a partial refresh when possible.
+// Convention: in GFXcanvas1, bit=1 = white (background), bit=0 = black (ink).
+// Flush uses drawBitmap(…, GxEPD_WHITE, GxEPD_BLACK) so the panel sees the
+// same pixel values as the canvas.
+static void flushFrame() {
+    const uint8_t* cur = g_frame.getBuffer();
+
+    // Force a full refresh whenever the screen type changes.
+    bool screenChanged = (g_screen != g_lastScreen);
+    g_lastScreen = g_screen;
+
+    // Compute dirty bounding box in byte-columns (each byte = 8 pixels) × rows.
+    int y0 = ONION_DISPLAY_HEIGHT, y1 = -1;
+    int bx0 = FRAME_BPR, bx1 = -1;
+    for (int y = 0; y < ONION_DISPLAY_HEIGHT; ++y) {
+        for (int bx = 0; bx < FRAME_BPR; ++bx) {
+            if (cur[y * FRAME_BPR + bx] != g_prevFrame[y * FRAME_BPR + bx]) {
+                if (y  < y0)  y0  = y;
+                if (y  > y1)  y1  = y;
+                if (bx < bx0) bx0 = bx;
+                if (bx > bx1) bx1 = bx;
+            }
+        }
+    }
+
+    if (y1 < 0) return; // nothing changed — skip panel entirely
+
+    int dw = (bx1 - bx0 + 1) * 8;
+    int dh = y1 - y0 + 1;
+    float dirtyPct = (float)(dw * dh) / (float)(ONION_DISPLAY_WIDTH * ONION_DISPLAY_HEIGHT);
+
+    // Full refresh: first frame, screen change, large dirty area, or after 30
+    // consecutive partials (periodic ghost-clearing).
+    bool fullRefresh = g_forceFullRefresh || screenChanged ||
+                       dirtyPct > 0.75f   || g_partialCount >= 30;
+
+    if (fullRefresh) {
+        display.setFullWindow();
+        display.firstPage();
+        do {
+            display.drawBitmap(0, 0, cur,
+                ONION_DISPLAY_WIDTH, ONION_DISPLAY_HEIGHT,
+                GxEPD_WHITE, GxEPD_BLACK);
+        } while (display.nextPage());
+        g_partialCount    = 0;
+        g_forceFullRefresh = false;
+    } else {
+        int px0 = bx0 * 8;
+        int pw  = dw;
+        if (px0 + pw > ONION_DISPLAY_WIDTH) pw = ONION_DISPLAY_WIDTH - px0;
+        display.setPartialWindow(px0, y0, pw, dh);
+        display.firstPage();
+        do {
+            display.drawBitmap(0, 0, cur,
+                ONION_DISPLAY_WIDTH, ONION_DISPLAY_HEIGHT,
+                GxEPD_WHITE, GxEPD_BLACK);
+        } while (display.nextPage());
+        ++g_partialCount;
+    }
+
+    memcpy(g_prevFrame, cur, FRAME_BYTES);
 }
 
 static void redraw() {
     if (!g_needsRedraw) return;
-    display.setFullWindow();
-    display.firstPage();
-    do {
-        if (g_screen == SCREEN_BOOT_SPLASH) drawBootSplash();
-        else if (g_screen == SCREEN_LINK_PROMPT) drawLinkPrompt();
-        else if (g_screen == SCREEN_SCRIPT_EXPLORER) drawScriptExplorer();
-        else if (g_screen == SCREEN_TX_PROMPT) drawTransactionPrompt();
-        else if (g_screen == SCREEN_LUA_PROMPT) drawLuaPrompt();
-        else drawStatus();
-    } while (display.nextPage());
+    if (g_screen == SCREEN_BOOT_SPLASH)      drawBootSplash();
+    else if (g_screen == SCREEN_LINK_PROMPT)     drawLinkPrompt();
+    else if (g_screen == SCREEN_SCRIPT_EXPLORER) drawScriptExplorer();
+    else if (g_screen == SCREEN_TX_PROMPT)       drawTransactionPrompt();
+    else if (g_screen == SCREEN_LUA_PROMPT)      drawLuaPrompt();
+    else if (g_screen == SCREEN_SETTINGS)        drawSettingsScreen();
+    else if (g_screen == SCREEN_WIFI_OVERVIEW)   drawWifiOverview();
+    else if (g_screen == SCREEN_WIFI_SCANNING)   drawWifiScanning();
+    else if (g_screen == SCREEN_WIFI_LIST)       drawWifiList();
+    else if (g_screen == SCREEN_WIFI_PASSWORD)   drawWifiPassword();
+    else if (g_screen == SCREEN_WIFI_CONNECTING) drawWifiConnecting();
+    else if (g_screen == SCREEN_WIFI_RESULT)     drawWifiResult();
+    else drawStatus();
+    flushFrame();
     g_needsRedraw = false;
 }
 
 static bool ensureWifi() {
     if (WiFi.status() == WL_CONNECTED) return true;
+    if (g_wifiWorkerResult.load() == WIFI_WORKER_RUNNING) return false;
+    if (g_screen == SCREEN_WIFI_OVERVIEW || g_screen == SCREEN_WIFI_SCANNING ||
+        g_screen == SCREEN_WIFI_LIST || g_screen == SCREEN_WIFI_PASSWORD ||
+        g_screen == SCREEN_WIFI_CONNECTING) return false;
     if (!g_config.wifiSsid.length()) {
-        setLog("Provision WiFi over serial");
+        setLog("Provision WiFi in Settings");
         return false;
     }
 
@@ -940,6 +1082,240 @@ static bool ensureWifi() {
     setLog("WiFi connect failed");
     return false;
 }
+
+// Non-blocking background reconnect — fires WiFi.begin() and returns immediately.
+// WiFi driver connects asynchronously; loop() picks up WL_CONNECTED on next check.
+static void triggerWifiReconnect() {
+    if (WiFi.status() == WL_CONNECTED) return;
+    if (g_wifiWorkerResult.load() == WIFI_WORKER_RUNNING) return;
+    if (g_screen == SCREEN_WIFI_OVERVIEW || g_screen == SCREEN_WIFI_SCANNING ||
+        g_screen == SCREEN_WIFI_LIST || g_screen == SCREEN_WIFI_PASSWORD ||
+        g_screen == SCREEN_WIFI_CONNECTING) return;
+    if (!g_config.wifiSsid.length()) return;
+
+    WiFi.mode(WIFI_STA);
+    WiFi.begin(g_config.wifiSsid.c_str(), g_config.wifiPassword.c_str());
+    setLog("WiFi reconnecting...");
+}
+
+// ── WiFi async worker tasks ───────────────────────────────────────────────────
+
+static void wifiScanTask(void*) {
+    WiFi.disconnect();
+    WiFi.mode(WIFI_STA);
+    int n = WiFi.scanNetworks(false, false);
+    g_wifiNetworks.clear();
+    if (n >= 0) {
+        for (int i = 0; i < n && i < 20; i++) {
+            WifiNetwork net;
+            String ssid = WiFi.SSID(i);
+            strncpy(net.ssid, ssid.c_str(), 32);
+            net.ssid[32] = '\0';
+            net.rssi = (int8_t)WiFi.RSSI(i);
+            net.secured = (WiFi.encryptionType(i) != WIFI_AUTH_OPEN);
+            if (net.ssid[0]) g_wifiNetworks.push_back(net);
+        }
+        WiFi.scanDelete();
+        g_wifiWorkerResult.store(WIFI_WORKER_DONE);
+    } else {
+        g_wifiWorkerResult.store(WIFI_WORKER_FAILED);
+    }
+    vTaskDelete(nullptr);
+}
+
+static void wifiConnectTask(void* arg) {
+    const WifiConnectArgs* a = reinterpret_cast<const WifiConnectArgs*>(arg);
+    WiFi.disconnect();
+    WiFi.mode(WIFI_STA);
+    WiFi.begin(a->ssid, a->pass);
+    uint32_t start = millis();
+    while (WiFi.status() != WL_CONNECTED && millis() - start < WIFI_CONNECT_TIMEOUT_MS) {
+        vTaskDelay(pdMS_TO_TICKS(250));
+    }
+    g_wifiWorkerResult.store(WiFi.status() == WL_CONNECTED ? WIFI_WORKER_DONE : WIFI_WORKER_FAILED);
+    vTaskDelete(nullptr);
+}
+
+static void startWifiScan() {
+    g_wifiWorkerResult.store(WIFI_WORKER_RUNNING);
+    g_wifiNetworks.clear();
+    xTaskCreate(wifiScanTask, "wifi_scan", 4096, nullptr, 5, nullptr);
+}
+
+static void startWifiConnect(const char* ssid, const char* pass) {
+    g_wifiWorkerResult.store(WIFI_WORKER_RUNNING);
+    strncpy(g_wifiConnectArgs.ssid, ssid, 32); g_wifiConnectArgs.ssid[32] = '\0';
+    strncpy(g_wifiConnectArgs.pass, pass, 64); g_wifiConnectArgs.pass[64] = '\0';
+    xTaskCreate(wifiConnectTask, "wifi_conn", 4096, &g_wifiConnectArgs, 5, nullptr);
+}
+
+// ── Keyboard helpers ──────────────────────────────────────────────────────────
+
+static int kbRowLen(int row) {
+    if (row < 5) return (int)strlen(kKbNormal[row]);
+    return 4; // CAPS, SPACE, DEL, OK
+}
+
+static int kbCellW(int row) {
+    if (row == 2) return 29;
+    if (row == 3) return 37;
+    if (row == 4) return 22;
+    return 26; // rows 0,1 and control row (handled separately)
+}
+
+static int kbStartX(int row) {
+    if (row == 2) return 1;
+    if (row == 3) return 2;
+    return 2; // rows 0,1,4 (row 4: cell 22px × 12 = 264, start 0)
+}
+
+static int kbBoxY(int row) { return 36 + row * 20; }
+
+// ── WiFi screen draw functions ────────────────────────────────────────────────
+
+static void drawSettingsScreen() {
+    g_frame.fillScreen(GxEPD_WHITE);
+    printLine("SETTINGS", 22, &FreeMonoBold18pt7b);
+    printString((g_settingsSel == 0 ? "> " : "  ") + String("WiFi"), 58,
+        g_settingsSel == 0 ? &FreeMonoBold9pt7b : &FreeMono9pt7b);
+    printString((g_settingsSel == 1 ? "> " : "  ") + String("About"), 78,
+        g_settingsSel == 1 ? &FreeMonoBold9pt7b : &FreeMono9pt7b);
+}
+
+static void drawWifiOverview() {
+    g_frame.fillScreen(GxEPD_WHITE);
+    printLine("WIFI", 22, &FreeMonoBold18pt7b);
+    bool conn = WiFi.status() == WL_CONNECTED;
+    printString(String("Status: ") + (conn ? "Connected" : "Offline"), 48, &FreeMonoBold9pt7b);
+    if (conn) {
+        printString("SSID: " + clipped(WiFi.SSID(), 22), 66);
+        printString("IP: " + WiFi.localIP().toString(), 84);
+    } else if (g_config.wifiSsid.length()) {
+        printString("Last: " + clipped(g_config.wifiSsid, 22), 66);
+    }
+    const char* items[] = {"Scan Networks", "Disconnect", "Back"};
+    for (int i = 0; i < 3; i++) {
+        printString((g_wifiOverviewSel == i ? "> " : "  ") + String(items[i]),
+            108 + i * 18, g_wifiOverviewSel == i ? &FreeMonoBold9pt7b : &FreeMono9pt7b);
+    }
+}
+
+static void drawWifiScanning() {
+    g_frame.fillScreen(GxEPD_WHITE);
+    printLine("WIFI SCAN", 22, &FreeMonoBold18pt7b);
+    printString("Scanning networks...", 60, &FreeMonoBold9pt7b);
+    printString("Please wait (1-3s)", 80);
+    printString("CANCEL to abort", 140);
+}
+
+static void drawWifiList() {
+    g_frame.fillScreen(GxEPD_WHITE);
+    printLine("NETWORKS", 22, &FreeMonoBold18pt7b);
+    if (g_wifiNetworks.empty()) {
+        printString("No networks found", 60, &FreeMonoBold9pt7b);
+        return;
+    }
+    const int vis = 5;
+    int start = g_wifiListSel >= vis ? g_wifiListSel - vis + 1 : 0;
+    for (int r = 0; r < vis && start + r < (int)g_wifiNetworks.size(); r++) {
+        int idx = start + r;
+        const WifiNetwork& net = g_wifiNetworks[idx];
+        char buf[32];
+        snprintf(buf, sizeof(buf), "%ddB%s", net.rssi, net.secured ? "*" : " ");
+        String line = (idx == g_wifiListSel ? "> " : "  ") +
+                      clipped(String(net.ssid), 14) + " " + buf;
+        printString(line, 48 + r * 20,
+            idx == g_wifiListSel ? &FreeMonoBold9pt7b : &FreeMono9pt7b);
+    }
+}
+
+static void drawWifiPassword() {
+    g_frame.fillScreen(GxEPD_WHITE);
+
+    // Header
+    printString("Net: " + clipped(g_wifiConnectSsid, 24), 14, &FreeMonoBold9pt7b);
+    String passLine = "Pass: ";
+    for (int i = 0; i < g_wifiPassLen; i++) passLine += '*';
+    passLine += '_';
+    printString(clipped(passLine, 28), 29);
+
+    // Key box geometry
+    const int kCellH = 18;
+    const int kBaseline = 13; // baseline within cell
+
+    // Control row widths (CAPS, SPACE, DEL, OK) sum to 264
+    const int kCtrlW[4] = {58, 90, 58, 58};
+    const char* kCtrlLabel[4] = {"CAPS", "SPACE", "DEL", "OK"};
+
+    for (int row = 0; row < kKbTotalRows; row++) {
+        int boxY = kbBoxY(row);
+
+        if (row < 5) {
+            const char* rowStr = g_kbCaps ? kKbCaps[row] : kKbNormal[row];
+            int len = (int)strlen(rowStr);
+            int cw = (row == 4) ? 22 : kbCellW(row);
+            int sx = (row == 4) ? 0 : kbStartX(row);
+
+            for (int col = 0; col < len; col++) {
+                int cx = sx + col * cw;
+                bool sel = (g_kbRow == row && g_kbCol == col);
+                if (sel) {
+                    g_frame.fillRect(cx, boxY, cw - 1, kCellH, GxEPD_BLACK);
+                    g_frame.setTextColor(GxEPD_WHITE);
+                } else {
+                    g_frame.drawRect(cx, boxY, cw - 1, kCellH, GxEPD_BLACK);
+                    g_frame.setTextColor(GxEPD_BLACK);
+                }
+                g_frame.setFont(&FreeMono9pt7b);
+                g_frame.setCursor(cx + (cw - 7) / 2, boxY + kBaseline);
+                g_frame.print(rowStr[col]);
+            }
+        } else {
+            // Control row
+            int x = 0;
+            for (int col = 0; col < 4; col++) {
+                int w = kCtrlW[col];
+                bool sel = (g_kbRow == 5 && g_kbCol == col);
+                bool capsLit = (col == 0 && g_kbCaps);
+                bool inv = sel || capsLit;
+                if (inv) {
+                    g_frame.fillRect(x, boxY, w - 1, kCellH, GxEPD_BLACK);
+                    g_frame.setTextColor(GxEPD_WHITE);
+                } else {
+                    g_frame.drawRect(x, boxY, w - 1, kCellH, GxEPD_BLACK);
+                    g_frame.setTextColor(GxEPD_BLACK);
+                }
+                g_frame.setFont(&FreeMono9pt7b);
+                int lw = (int)strlen(kCtrlLabel[col]) * 7;
+                g_frame.setCursor(x + (w - lw) / 2, boxY + kBaseline);
+                g_frame.print(kCtrlLabel[col]);
+                x += w;
+            }
+        }
+    }
+    g_frame.setTextColor(GxEPD_BLACK);
+}
+
+static void drawWifiConnecting() {
+    g_frame.fillScreen(GxEPD_WHITE);
+    printLine("WIFI", 22, &FreeMonoBold18pt7b);
+    printString("Connecting to:", 50, &FreeMonoBold9pt7b);
+    printString(clipped(g_wifiConnectSsid, 26), 68);
+    printString("Please wait...", 100);
+    printString("CANCEL to abort", 140);
+}
+
+static void drawWifiResult() {
+    g_frame.fillScreen(GxEPD_WHITE);
+    printLine("WIFI", 22, &FreeMonoBold18pt7b);
+    printString(g_wifiResultMsg, 58, &FreeMonoBold9pt7b);
+    if (WiFi.status() == WL_CONNECTED) {
+        printString("IP: " + WiFi.localIP().toString(), 78);
+    }
+    printString("SELECT or CANCEL to continue", 120);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 
 static esp_err_t httpCaptureEvent(esp_http_client_event_t* event) {
     if (event->event_id == HTTP_EVENT_ON_DATA && event->user_data && event->data && event->data_len > 0) {
@@ -1155,6 +1531,7 @@ static void subscribeBadgeTopics() {
 
 static void handleLinkRequest(cJSON* root) {
     g_luaDisplayActive = false;
+    g_forceFullRefresh = true;
     g_linkPrompt.requestId = jsonString(root, "requestId");
     g_linkPrompt.username = jsonString(root, "username");
     g_linkPrompt.active = true;
@@ -1164,6 +1541,7 @@ static void handleLinkRequest(cJSON* root) {
 
 static void handleTransactionRequest(cJSON* root) {
     g_luaDisplayActive = false;
+    g_forceFullRefresh = true;
     g_txPrompt.operationId = jsonString(root, "operationId");
     g_txPrompt.requestId = jsonString(root, "requestId");
     g_txPrompt.type = jsonString(root, "type");
@@ -1176,6 +1554,7 @@ static void handleTransactionRequest(cJSON* root) {
 
 static void handleLuaRequest(cJSON* root) {
     g_luaDisplayActive = false;
+    g_forceFullRefresh = true;
     g_luaPrompt.requestId = jsonString(root, "requestId");
     g_luaPrompt.scriptId = jsonString(root, "scriptId");
     g_luaPrompt.title = jsonString(root, "title");
@@ -1902,14 +2281,15 @@ static uint16_t canvasColor(uint16_t displayColor) {
 }
 
 static void refreshLuaCanvas() {
-    display.setFullWindow();
-    display.firstPage();
-    do {
-        display.fillScreen(GxEPD_WHITE);
-        display.drawBitmap(0, 0, g_luaCanvas.getBuffer(), g_luaCanvas.width(), g_luaCanvas.height(), GxEPD_BLACK);
-    } while (display.nextPage());
+    // Copy lua canvas into the UI framebuffer with bit inversion so flushFrame()
+    // can apply the same partial-refresh logic to Lua screens.
+    // Conventions differ: g_luaCanvas bit=1=black; g_frame bit=0=black.
+    const uint8_t* src = g_luaCanvas.getBuffer();
+    uint8_t*       dst = g_frame.getBuffer();
+    for (int i = 0; i < FRAME_BYTES; ++i) dst[i] = ~src[i];
     g_luaDisplayActive = true;
     g_needsRedraw = false;
+    flushFrame();
 }
 
 static void renderBitmap(const LoadedBitmap& bitmap, int x, int y, bool clearScreen) {
@@ -3127,6 +3507,7 @@ static int luaOnionClearDisplay(lua_State*) {
 
 static int luaOnionReleaseDisplay(lua_State*) {
     g_luaDisplayActive = false;
+    g_forceFullRefresh = true;  // guarantee clean full refresh over Lua content
     g_needsRedraw = true;
     return 0;
 }
@@ -3308,7 +3689,6 @@ static int luaOnionButtonMask(lua_State* L) {
 
 static int luaOnionButtons(lua_State* L) {
     uint8_t buttons = readButtons();
-    g_lastButtons = buttons;
     lua_newtable(L);
 
     lua_pushinteger(L, buttons);
@@ -3976,6 +4356,10 @@ static void handleSerial() {
 }
 
 static void handleButtons() {
+    uint32_t now = millis();
+    if (now - g_lastButtonPoll < 50) return;
+    g_lastButtonPoll = now;
+
     uint8_t buttons = readButtons();
     uint8_t pressed = buttons & ~g_lastButtons;
     g_lastButtons = buttons;
@@ -3983,6 +4367,7 @@ static void handleButtons() {
 
     if (g_luaDisplayActive) {
         g_luaDisplayActive = false;
+        g_forceFullRefresh = true;  // guarantee clean full refresh over Lua content
         g_screen = SCREEN_STATUS;
         g_needsRedraw = true;
         return;
@@ -4012,6 +4397,111 @@ static void handleButtons() {
             if ((pressed & BTN_UP) && g_scriptSelection > 0) g_scriptSelection--;
             if ((pressed & BTN_DOWN) && g_scriptSelection + 1 < (int)g_scripts.size()) g_scriptSelection++;
         }
+    } else if (g_screen == SCREEN_SETTINGS) {
+        if (pressed & BTN_CANCEL) {
+            g_screen = SCREEN_STATUS;
+        } else if (pressed & (BTN_UP | BTN_DOWN)) {
+            g_settingsSel = (g_settingsSel + 1) % 2;
+        } else if (pressed & BTN_SELECT) {
+            if (g_settingsSel == 0) {
+                g_wifiOverviewSel = 0;
+                g_screen = SCREEN_WIFI_OVERVIEW;
+            }
+        }
+    } else if (g_screen == SCREEN_WIFI_OVERVIEW) {
+        if (pressed & BTN_CANCEL) {
+            g_screen = SCREEN_SETTINGS;
+        } else if (pressed & BTN_UP) {
+            g_wifiOverviewSel = (g_wifiOverviewSel + 2) % 3;
+        } else if (pressed & BTN_DOWN) {
+            g_wifiOverviewSel = (g_wifiOverviewSel + 1) % 3;
+        } else if (pressed & BTN_SELECT) {
+            if (g_wifiOverviewSel == 0) {
+                g_lastWifiAttempt = millis(); // prevent background reconnect during scan
+                startWifiScan();
+                g_screen = SCREEN_WIFI_SCANNING;
+            } else if (g_wifiOverviewSel == 1) {
+                WiFi.disconnect();
+                setLog("WiFi disconnected");
+            } else {
+                g_screen = SCREEN_SETTINGS;
+            }
+        }
+    } else if (g_screen == SCREEN_WIFI_SCANNING) {
+        if (pressed & BTN_CANCEL) {
+            g_wifiWorkerResult.store(WIFI_WORKER_IDLE);
+            g_screen = SCREEN_WIFI_OVERVIEW;
+        }
+    } else if (g_screen == SCREEN_WIFI_LIST) {
+        if (pressed & BTN_CANCEL) {
+            g_screen = SCREEN_WIFI_OVERVIEW;
+        } else if (pressed & BTN_UP) {
+            if (g_wifiListSel > 0) g_wifiListSel--;
+        } else if (pressed & BTN_DOWN) {
+            if (g_wifiListSel + 1 < (int)g_wifiNetworks.size()) g_wifiListSel++;
+        } else if ((pressed & BTN_SELECT) && !g_wifiNetworks.empty()) {
+            g_wifiConnectSsid = String(g_wifiNetworks[g_wifiListSel].ssid);
+            if (!g_wifiNetworks[g_wifiListSel].secured) {
+                g_wifiPassBuf[0] = '\0';
+                startWifiConnect(g_wifiConnectSsid.c_str(), "");
+                g_screen = SCREEN_WIFI_CONNECTING;
+            } else {
+                g_wifiPassLen = 0;
+                memset(g_wifiPassBuf, 0, sizeof(g_wifiPassBuf));
+                g_kbRow = 1; g_kbCol = 0; g_kbCaps = false;
+                g_screen = SCREEN_WIFI_PASSWORD;
+            }
+        }
+    } else if (g_screen == SCREEN_WIFI_PASSWORD) {
+        if (pressed & BTN_UP) {
+            g_kbRow = (g_kbRow + kKbTotalRows - 1) % kKbTotalRows;
+            int maxCol = kbRowLen(g_kbRow) - 1;
+            if (g_kbCol > maxCol) g_kbCol = maxCol;
+        } else if (pressed & BTN_DOWN) {
+            g_kbRow = (g_kbRow + 1) % kKbTotalRows;
+            int maxCol = kbRowLen(g_kbRow) - 1;
+            if (g_kbCol > maxCol) g_kbCol = maxCol;
+        } else if (pressed & BTN_LEFT) {
+            int len = kbRowLen(g_kbRow);
+            g_kbCol = (g_kbCol + len - 1) % len;
+        } else if (pressed & BTN_RIGHT) {
+            int len = kbRowLen(g_kbRow);
+            g_kbCol = (g_kbCol + 1) % len;
+        } else if (pressed & BTN_SELECT) {
+            if (g_kbRow == 5) {
+                if (g_kbCol == 0) {
+                    g_kbCaps = !g_kbCaps;
+                } else if (g_kbCol == 1 && g_wifiPassLen < 64) {
+                    g_wifiPassBuf[g_wifiPassLen++] = ' ';
+                } else if (g_kbCol == 2) {
+                    if (g_wifiPassLen > 0) g_wifiPassLen--;
+                } else if (g_kbCol == 3) {
+                    g_wifiPassBuf[g_wifiPassLen] = '\0';
+                    startWifiConnect(g_wifiConnectSsid.c_str(), g_wifiPassBuf);
+                    g_screen = SCREEN_WIFI_CONNECTING;
+                }
+            } else if (g_wifiPassLen < 64) {
+                const char* rowStr = g_kbCaps ? kKbCaps[g_kbRow] : kKbNormal[g_kbRow];
+                g_wifiPassBuf[g_wifiPassLen++] = rowStr[g_kbCol];
+            }
+        } else if (pressed & BTN_CANCEL) {
+            if (g_wifiPassLen > 0) {
+                g_wifiPassLen--;
+            } else {
+                g_screen = SCREEN_WIFI_LIST;
+            }
+        }
+    } else if (g_screen == SCREEN_WIFI_CONNECTING) {
+        if (pressed & BTN_CANCEL) {
+            g_wifiWorkerResult.store(WIFI_WORKER_IDLE);
+            WiFi.disconnect();
+            g_screen = SCREEN_WIFI_OVERVIEW;
+        }
+    } else if (g_screen == SCREEN_WIFI_RESULT) {
+        if (pressed & (BTN_SELECT | BTN_CANCEL)) {
+            g_wifiOverviewSel = 0;
+            g_screen = SCREEN_WIFI_OVERVIEW;
+        }
     } else {
         if (pressed & BTN_UP) {
             g_homeSelection = (g_homeSelection + HOME_ITEM_COUNT - 1) % HOME_ITEM_COUNT;
@@ -4029,6 +4519,9 @@ static void handleButtons() {
                 doHttpHandshake();
                 doMqttHandshake();
                 refreshPublicProfile();
+            } else if (g_homeSelection == HOME_ITEM_SETTINGS) {
+                g_settingsSel = 0;
+                g_screen = SCREEN_SETTINGS;
             }
         }
         if (pressed & BTN_RIGHT) {
@@ -4071,7 +4564,43 @@ void loop() {
     handleButtons();
     sampleBattery();
 
-    if (WiFi.status() != WL_CONNECTED) ensureWifi();
+    // Handle WiFi worker state transitions
+    int wr = g_wifiWorkerResult.load();
+    if (g_screen == SCREEN_WIFI_SCANNING) {
+        if (wr == WIFI_WORKER_DONE) {
+            g_wifiWorkerResult.store(WIFI_WORKER_IDLE);
+            g_wifiListSel = 0;
+            g_screen = SCREEN_WIFI_LIST;
+            g_needsRedraw = true;
+        } else if (wr == WIFI_WORKER_FAILED) {
+            g_wifiWorkerResult.store(WIFI_WORKER_IDLE);
+            g_wifiResultMsg = "Scan failed";
+            g_screen = SCREEN_WIFI_RESULT;
+            g_needsRedraw = true;
+        }
+    } else if (g_screen == SCREEN_WIFI_CONNECTING) {
+        if (wr == WIFI_WORKER_DONE) {
+            g_wifiWorkerResult.store(WIFI_WORKER_IDLE);
+            g_prefs.putString("wifi_ssid", g_wifiConnectSsid.c_str());
+            g_prefs.putString("wifi_pass", g_wifiPassBuf);
+            g_config.wifiSsid = g_wifiConnectSsid;
+            g_config.wifiPassword = String(g_wifiPassBuf);
+            setLog("WiFi connected");
+            g_wifiResultMsg = "Connected!";
+            g_screen = SCREEN_WIFI_RESULT;
+            g_needsRedraw = true;
+        } else if (wr == WIFI_WORKER_FAILED) {
+            g_wifiWorkerResult.store(WIFI_WORKER_IDLE);
+            g_wifiResultMsg = "Connect failed";
+            g_screen = SCREEN_WIFI_RESULT;
+            g_needsRedraw = true;
+        }
+    }
+
+    if (WiFi.status() != WL_CONNECTED && millis() - g_lastWifiAttempt > 30000) {
+        g_lastWifiAttempt = millis();
+        triggerWifiReconnect();
+    }
     ensureMqtt();
 
     if (millis() - g_lastHandshake > HANDSHAKE_INTERVAL_MS) {
