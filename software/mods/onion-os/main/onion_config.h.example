@@ -19,10 +19,3 @@
 // Optional JSON manifest:
 // { "scripts": [{ "name": "hello.lua", "url": "https://...", "autorun": false }] }
 #define ONION_DEFAULT_SCRIPT_MANIFEST_URL ""
-
-// Optional LiPo battery sensing. Requires a hardware voltage divider from
-// BAT/VSYS to an ADC-capable ESP32-S3 GPIO. Leave disabled when no divider is
-// fitted; otherwise set the GPIO and ratio, for example a 100K/100K divider:
-// #define PIN_BATTERY_ADC 4
-// #define BATTERY_ADC_DIVIDER_RATIO 2.0f
-// #define BATTERY_ADC_OFFSET_MV 0

@@ -24,8 +24,8 @@ other badge firmware in this repo.
   - publishes link, transaction, and Lua responses.
 - E-paper status and approval UI.
 - Three-second boot splash generated from `main/logo.png`.
-- Home menu showing linked username, Onion balance, script explorer, script sync,
-  and profile refresh actions.
+- Home menu showing linked username, Onion balance, script explorer, profile
+  refresh, and settings actions.
 - SELECT/CANCEL approval controls through the TCA9534 button expander.
 - HTTP fallback for link and transaction responses.
 - Script manifest download and SPIFFS storage.
@@ -118,9 +118,9 @@ popup, stores approved code in SPIFFS, runs it, and responds on
 Installed scripts are stored as `/scripts_*.lua`. Downloaded image assets are
 stored as `/images_*.pbm` or `/images_*.bmp`. The badge's home menu opens a
 script explorer that lists both manifest-downloaded scripts and server-pushed
-scripts from SPIFFS. In the script explorer, `SELECT` runs the highlighted
-script, `LEFT` deletes it from the badge, `RIGHT` syncs scripts, and `CANCEL`
-returns home.
+scripts from SPIFFS. In the script explorer, selecting `Update Scripts`
+downloads the configured manifest; selecting a script runs it, `LEFT` deletes
+the highlighted script from the badge, and `CANCEL` returns home.
 
 The handshake routes currently only return `onionId` and `status`. After a badge
 is linked, the firmware refreshes its owner profile by Onion ID with

@@ -80,6 +80,7 @@ extern "C" {
 #define MQTT_HANDSHAKE_ACCEPT_WINDOW_MS 10000
 #define BOOT_SPLASH_MS 3000
 #define MAX_SCRIPT_BYTES (64 * 1024)
+#define MQTT_RX_MAX_BYTES (MAX_SCRIPT_BYTES * 2 + 4096)
 #define MAX_IMAGE_BYTES (192 * 1024)
 #define ATECC_HMAC_SLOT 10
 #define ATECC_I2C_ADDRESS_8BIT 0xC0
@@ -115,17 +116,6 @@ extern "C" {
 #define SOUND_MIC_MAX_SAMPLES 4096
 #define ONION_DISPLAY_WIDTH 264
 #define ONION_DISPLAY_HEIGHT 176
-#ifndef PIN_BATTERY_ADC
-#define PIN_BATTERY_ADC -1
-#endif
-#ifndef BATTERY_ADC_DIVIDER_RATIO
-#define BATTERY_ADC_DIVIDER_RATIO 2.0f
-#endif
-#ifndef BATTERY_ADC_OFFSET_MV
-#define BATTERY_ADC_OFFSET_MV 0
-#endif
-#define BATTERY_SAMPLE_INTERVAL_MS 60000
-#define BATTERY_REDRAW_PERCENT_STEP 5
 
 GxEPD2_BW<GxEPD2_270_GDEY027T91, GxEPD2_270_GDEY027T91::HEIGHT> display(
     GxEPD2_270_GDEY027T91(PIN_EPD_CS, PIN_EPD_DC, PIN_EPD_RST, PIN_EPD_BUSY)
@@ -163,7 +153,6 @@ enum Screen : uint8_t {
 
 enum HomeItem : int {
     HOME_ITEM_SCRIPTS,
-    HOME_ITEM_SYNC,
     HOME_ITEM_REFRESH,
     HOME_ITEM_SETTINGS,
     HOME_ITEM_COUNT,
@@ -246,12 +235,15 @@ static bool   g_deleteChoice = false; // false=CANCEL, true=DELETE
 static bool g_luaDisplayActive = false;
 static bool g_ateccReady = false;
 static uint8_t g_ateccSerial[ATECC_SERIAL_LEN] = {};
+<<<<<<< HEAD
 #if PIN_BATTERY_ADC >= 0
 static int g_batteryPercent = -1;
 static int g_batteryVoltageMv = 0;
 static int g_batteryDisplayedPercent = -1;
 static uint32_t g_lastBatterySample = 0;
 #endif
+=======
+>>>>>>> 1b8f27e (mqtt json fix)
 
 // ── WiFi setup state ─────────────────────────────────────────────────────────
 struct WifiNetwork {
@@ -352,6 +344,9 @@ static uint8_t g_luaMqttSubCount = 0;
 static MqttQueuedMessage g_luaMqttQueue[ONION_LUA_MQTT_QUEUE_LEN];
 static uint8_t g_luaMqttQueueHead = 0;
 static uint8_t g_luaMqttQueueCount = 0;
+static String g_mqttRxTopic;
+static String g_mqttRxPayload;
+static int g_mqttRxExpectedLen = 0;
 
 static String prefString(const char* key, const char* fallback) {
     String value = g_prefs.getString(key, "");
@@ -742,12 +737,6 @@ static void initPeripherals() {
     display.init(SERIAL_BAUD, true, 10, false);
     display.setRotation(1);
 
-#if PIN_BATTERY_ADC >= 0
-    pinMode(PIN_BATTERY_ADC, INPUT);
-    analogReadResolution(12);
-    analogSetPinAttenuation(PIN_BATTERY_ADC, ADC_11db);
-#endif
-
     SPIFFS.begin(true);
 }
 
@@ -775,6 +764,7 @@ static String clipped(const String& value, size_t len) {
     return value.substring(0, len - 3) + "...";
 }
 
+<<<<<<< HEAD
 
 
 static void sampleBattery(bool force = false) {
@@ -840,6 +830,8 @@ static void sampleBattery(bool force = false) {
 #endif
 }
 
+=======
+>>>>>>> 1b8f27e (mqtt json fix)
 static String storedScriptDisplayName(const String& path) {
     String name = path;
     if (name.startsWith("/")) name.remove(0, 1);
@@ -889,7 +881,7 @@ static void refreshScriptList() {
     std::sort(g_scripts.begin(), g_scripts.end(), [](const String& a, const String& b) {
         return strcmp(a.c_str(), b.c_str()) < 0;
     });
-    if (g_scriptSelection >= (int)g_scripts.size()) g_scriptSelection = std::max(0, (int)g_scripts.size() - 1);
+    if (g_scriptSelection > (int)g_scripts.size()) g_scriptSelection = (int)g_scripts.size();
 }
 
 static void drawBootSplash() {
@@ -915,74 +907,34 @@ static void drawStatus() {
 
     String user = g_identity.username.length() ? g_identity.username : (g_identity.linked ? "linked" : "not linked");
     printString("User: " + clipped(user, 21), 48, &FreeMonoBold9pt7b);
+<<<<<<< HEAD
     printString("Onions: " + clipped(g_identity.onionCount, 18), 66);
     // ID + connection status — no longer collides with a battery text line
+=======
+    printString("Onions: " + clipped(g_identity.onionCount, 18), 68);
+>>>>>>> 1b8f27e (mqtt json fix)
     printString("ID: " + String(g_identity.onionId ? String(g_identity.onionId) : "pending") +
         "  " + String(g_mqttConnected ? "MQTT" : (WiFi.status() == WL_CONNECTED ? "WiFi" : "offline")), 84);
     drawHomeItem(HOME_ITEM_SCRIPTS, "Scripts Explorer", 100);
-    drawHomeItem(HOME_ITEM_SYNC, "Sync Scripts", 116);
-    drawHomeItem(HOME_ITEM_REFRESH, "Refresh Profile", 132);
-    drawHomeItem(HOME_ITEM_SETTINGS, "Settings", 148);
+    drawHomeItem(HOME_ITEM_REFRESH, "Refresh Profile", 116);
+    drawHomeItem(HOME_ITEM_SETTINGS, "Settings", 132);
     printString(clipped(g_log, 30), 168);
 }
 
 static void drawScriptExplorer() {
     g_frame.fillScreen(GxEPD_WHITE);
     printLine("SCRIPTS", 22, &FreeMonoBold18pt7b);
-    if (g_scripts.empty()) {
-        printString("No scripts installed", 58, &FreeMonoBold9pt7b);
-        return;
-    }
 
     int start = 0;
     const int visibleRows = 5;
     if (g_scriptSelection >= visibleRows) start = g_scriptSelection - visibleRows + 1;
-    for (int row = 0; row < visibleRows && start + row < (int)g_scripts.size(); ++row) {
+    int itemCount = (int)g_scripts.size() + 1;
+    for (int row = 0; row < visibleRows && start + row < itemCount; ++row) {
         int idx = start + row;
         String prefix = idx == g_scriptSelection ? "> " : "  ";
         printString(prefix + clipped(storedScriptDisplayName(g_scripts[idx]), 24), 52 + row * 20,
             idx == g_scriptSelection ? &FreeMonoBold9pt7b : &FreeMono9pt7b);
     }
-}
-
-static void drawDeleteConfirm() {
-    g_frame.fillScreen(GxEPD_WHITE);
-    // Header
-    g_frame.fillRect(0, 0, ONION_DISPLAY_WIDTH, 28, GxEPD_BLACK);
-    g_frame.setFont(&FreeMonoBold9pt7b);
-    g_frame.setTextColor(GxEPD_WHITE);
-    g_frame.setCursor(6, 20);
-    g_frame.print("DELETE SCRIPT?");
-    // Script name + warning
-    g_frame.setTextColor(GxEPD_BLACK);
-    g_frame.setFont(&FreeMonoBold9pt7b);
-    g_frame.setCursor(6, 50);
-    g_frame.print(clipped(storedScriptDisplayName(g_pendingDeletePath), 24));
-    g_frame.setFont(&FreeMono9pt7b);
-    g_frame.setCursor(6, 72);
-    g_frame.print("This cannot be undone.");
-    g_frame.drawLine(0, 84, ONION_DISPLAY_WIDTH - 1, 84, GxEPD_BLACK);
-    g_frame.setFont(&FreeMonoBold9pt7b);
-    // CANCEL button (left) — filled when selected
-    if (!g_deleteChoice) {
-        g_frame.fillRect(8, 118, 112, 30, GxEPD_BLACK);
-        g_frame.setTextColor(GxEPD_WHITE);
-    } else {
-        g_frame.drawRect(8, 118, 112, 30, GxEPD_BLACK);
-        g_frame.setTextColor(GxEPD_BLACK);
-    }
-    g_frame.setCursor(28, 139);
-    g_frame.print("CANCEL");
-    // DELETE button (right) — filled when selected
-    if (g_deleteChoice) {
-        g_frame.fillRect(144, 118, 112, 30, GxEPD_BLACK);
-        g_frame.setTextColor(GxEPD_WHITE);
-    } else {
-        g_frame.drawRect(144, 118, 112, 30, GxEPD_BLACK);
-        g_frame.setTextColor(GxEPD_BLACK);
-    }
-    g_frame.setCursor(164, 139);
-    g_frame.print("DELETE");
 }
 
 static void drawLinkPrompt() {
@@ -1639,6 +1591,12 @@ static void handleLuaRequest(cJSON* root) {
 }
 
 static void handleMqttPayload(const String& incomingTopic, const String& payload) {
+    bool isControlTopic = incomingTopic.endsWith("/handshake/accepted") ||
+        incomingTopic.endsWith("/link/request") ||
+        incomingTopic.endsWith("/transaction/request") ||
+        incomingTopic.endsWith("/lua/request");
+    if (!isControlTopic) return;
+
     cJSON* root = cJSON_Parse(payload.c_str());
     if (!root) {
         setLog("Bad MQTT JSON");
@@ -1745,6 +1703,68 @@ static void luaMqttMaybeQueue(const char* topic, uint16_t topicLen, const char* 
     portEXIT_CRITICAL(&g_luaMqttMux);
 }
 
+static void processMqttMessage(const String& incomingTopic, const String& payload) {
+    uint16_t topicLen = incomingTopic.length() > 65535 ? 65535 : (uint16_t)incomingTopic.length();
+    uint16_t payloadLen = payload.length() > 65535 ? 65535 : (uint16_t)payload.length();
+    luaMqttMaybeQueue(incomingTopic.c_str(), topicLen, payload.c_str(), payloadLen);
+    handleMqttPayload(incomingTopic, payload);
+}
+
+static void resetMqttFragmentBuffer() {
+    g_mqttRxTopic = "";
+    g_mqttRxPayload = "";
+    g_mqttRxExpectedLen = 0;
+}
+
+static void processMqttEventData(esp_mqtt_event_handle_t event) {
+    String incomingTopic = (event->topic && event->topic_len > 0)
+        ? String(event->topic, event->topic_len)
+        : String();
+    String payloadChunk = (event->data && event->data_len > 0)
+        ? String(event->data, event->data_len)
+        : String();
+
+    int totalLen = event->total_data_len > 0 ? event->total_data_len : event->data_len;
+    int offset = event->current_data_offset;
+    if (totalLen > MQTT_RX_MAX_BYTES) {
+        resetMqttFragmentBuffer();
+        setLog("MQTT payload too large");
+        return;
+    }
+
+    bool fragmented = totalLen > event->data_len || offset > 0;
+    if (!fragmented) {
+        processMqttMessage(incomingTopic, payloadChunk);
+        return;
+    }
+
+    if (offset == 0) {
+        resetMqttFragmentBuffer();
+        g_mqttRxTopic = incomingTopic;
+        g_mqttRxExpectedLen = totalLen;
+        g_mqttRxPayload.reserve((unsigned int)totalLen);
+    } else if (!g_mqttRxExpectedLen || offset != (int)g_mqttRxPayload.length()) {
+        resetMqttFragmentBuffer();
+        setLog("Bad MQTT fragment");
+        return;
+    } else if (incomingTopic.length() && g_mqttRxTopic.length() && incomingTopic != g_mqttRxTopic) {
+        resetMqttFragmentBuffer();
+        setLog("Bad MQTT fragment");
+        return;
+    }
+
+    g_mqttRxPayload += payloadChunk;
+    if ((int)g_mqttRxPayload.length() < g_mqttRxExpectedLen) return;
+    if ((int)g_mqttRxPayload.length() > g_mqttRxExpectedLen) {
+        resetMqttFragmentBuffer();
+        setLog("Bad MQTT fragment");
+        return;
+    }
+
+    processMqttMessage(g_mqttRxTopic, g_mqttRxPayload);
+    resetMqttFragmentBuffer();
+}
+
 static void mqttEventHandler(void*, esp_event_base_t, int32_t eventId, void* eventData) {
     esp_mqtt_event_handle_t event = (esp_mqtt_event_handle_t)eventData;
     switch ((esp_mqtt_event_id_t)eventId) {
@@ -1759,25 +1779,7 @@ static void mqttEventHandler(void*, esp_event_base_t, int32_t eventId, void* eve
         setLog("MQTT disconnected");
         break;
     case MQTT_EVENT_DATA: {
-        // ESP-IDF fragments large payloads across multiple MQTT_EVENT_DATA events.
-        // Accumulate until current_data_offset + data_len == total_data_len.
-        static String s_fragTopic;
-        static String s_fragPayload;
-
-        if (event->current_data_offset == 0) {
-            s_fragTopic   = String(event->topic, event->topic_len);
-            s_fragPayload = String(event->data,  event->data_len);
-        } else {
-            s_fragPayload += String(event->data, event->data_len);
-        }
-
-        if ((int)s_fragPayload.length() < event->total_data_len) break;
-
-        luaMqttMaybeQueue(s_fragTopic.c_str(), (uint16_t)s_fragTopic.length(),
-                          s_fragPayload.c_str(), (uint16_t)s_fragPayload.length());
-        handleMqttPayload(s_fragTopic, s_fragPayload);
-        s_fragTopic   = "";
-        s_fragPayload = "";
+        processMqttEventData(event);
         break;
     }
     default:
@@ -4698,17 +4700,16 @@ static void handleButtons() {
         if (pressed & BTN_CANCEL) {
             g_screen = SCREEN_STATUS;
         } else if ((pressed & BTN_LEFT) && !g_scripts.empty()) {
-            g_pendingDeletePath = g_scripts[g_scriptSelection];
-            g_deleteChoice = false;
-            g_screen = SCREEN_DELETE_CONFIRM;
+            deleteStoredScript(g_scripts[g_scriptSelection]);
+            refreshScriptList();
         } else if ((pressed & BTN_RIGHT)) {
             syncScripts();
             refreshScriptList();
-        } else if ((pressed & BTN_SELECT) && !g_scripts.empty()) {
-            runStoredScript(g_scripts[g_scriptSelection]);
+        } else if ((pressed & BTN_SELECT) && g_scriptSelection <= (int)g_scripts.size()) {
+            runStoredScript(g_scripts[g_scriptSelection - 1]);
         } else {
             if ((pressed & BTN_UP) && g_scriptSelection > 0) g_scriptSelection--;
-            if ((pressed & BTN_DOWN) && g_scriptSelection + 1 < (int)g_scripts.size()) g_scriptSelection++;
+            if ((pressed & BTN_DOWN) && g_scriptSelection < (int)g_scripts.size()) g_scriptSelection++;
         }
     } else if (g_screen == SCREEN_SETTINGS) {
         if (pressed & BTN_CANCEL) {
@@ -4826,8 +4827,6 @@ static void handleButtons() {
             if (g_homeSelection == HOME_ITEM_SCRIPTS) {
                 refreshScriptList();
                 g_screen = SCREEN_SCRIPT_EXPLORER;
-            } else if (g_homeSelection == HOME_ITEM_SYNC) {
-                syncScripts();
             } else if (g_homeSelection == HOME_ITEM_REFRESH) {
                 doHttpHandshake();
                 doMqttHandshake();
@@ -4854,7 +4853,6 @@ void setup() {
     g_needsRedraw = true;
     redraw();
     delay(BOOT_SPLASH_MS);
-    sampleBattery(true);
     g_screen = SCREEN_STATUS;
     g_needsRedraw = true;
     redraw();
@@ -4871,7 +4869,6 @@ void setup() {
 void loop() {
     handleSerial();
     handleButtons();
-    sampleBattery();
 
     // Handle WiFi worker state transitions
     int wr = g_wifiWorkerResult.load();
