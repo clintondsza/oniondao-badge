@@ -116,6 +116,17 @@ extern "C" {
 #define SOUND_MIC_MAX_SAMPLES 4096
 #define ONION_DISPLAY_WIDTH 264
 #define ONION_DISPLAY_HEIGHT 176
+#ifndef PIN_BATTERY_ADC
+#define PIN_BATTERY_ADC -1
+#endif
+#ifndef BATTERY_ADC_DIVIDER_RATIO
+#define BATTERY_ADC_DIVIDER_RATIO 2.0f
+#endif
+#ifndef BATTERY_ADC_OFFSET_MV
+#define BATTERY_ADC_OFFSET_MV 0
+#endif
+#define BATTERY_SAMPLE_INTERVAL_MS 60000
+#define BATTERY_REDRAW_PERCENT_STEP 5
 
 GxEPD2_BW<GxEPD2_270_GDEY027T91, GxEPD2_270_GDEY027T91::HEIGHT> display(
     GxEPD2_270_GDEY027T91(PIN_EPD_CS, PIN_EPD_DC, PIN_EPD_RST, PIN_EPD_BUSY)
@@ -235,15 +246,12 @@ static bool   g_deleteChoice = false; // false=CANCEL, true=DELETE
 static bool g_luaDisplayActive = false;
 static bool g_ateccReady = false;
 static uint8_t g_ateccSerial[ATECC_SERIAL_LEN] = {};
-<<<<<<< HEAD
 #if PIN_BATTERY_ADC >= 0
 static int g_batteryPercent = -1;
 static int g_batteryVoltageMv = 0;
 static int g_batteryDisplayedPercent = -1;
 static uint32_t g_lastBatterySample = 0;
 #endif
-=======
->>>>>>> 1b8f27e (mqtt json fix)
 
 // ── WiFi setup state ─────────────────────────────────────────────────────────
 struct WifiNetwork {
@@ -737,6 +745,12 @@ static void initPeripherals() {
     display.init(SERIAL_BAUD, true, 10, false);
     display.setRotation(1);
 
+#if PIN_BATTERY_ADC >= 0
+    pinMode(PIN_BATTERY_ADC, INPUT);
+    analogReadResolution(12);
+    analogSetPinAttenuation(PIN_BATTERY_ADC, ADC_11db);
+#endif
+
     SPIFFS.begin(true);
 }
 
@@ -763,9 +777,6 @@ static String clipped(const String& value, size_t len) {
     if (value.length() <= len) return value;
     return value.substring(0, len - 3) + "...";
 }
-
-<<<<<<< HEAD
-
 
 static void sampleBattery(bool force = false) {
 #if PIN_BATTERY_ADC >= 0
@@ -830,8 +841,6 @@ static void sampleBattery(bool force = false) {
 #endif
 }
 
-=======
->>>>>>> 1b8f27e (mqtt json fix)
 static String storedScriptDisplayName(const String& path) {
     String name = path;
     if (name.startsWith("/")) name.remove(0, 1);
@@ -907,12 +916,8 @@ static void drawStatus() {
 
     String user = g_identity.username.length() ? g_identity.username : (g_identity.linked ? "linked" : "not linked");
     printString("User: " + clipped(user, 21), 48, &FreeMonoBold9pt7b);
-<<<<<<< HEAD
     printString("Onions: " + clipped(g_identity.onionCount, 18), 66);
     // ID + connection status — no longer collides with a battery text line
-=======
-    printString("Onions: " + clipped(g_identity.onionCount, 18), 68);
->>>>>>> 1b8f27e (mqtt json fix)
     printString("ID: " + String(g_identity.onionId ? String(g_identity.onionId) : "pending") +
         "  " + String(g_mqttConnected ? "MQTT" : (WiFi.status() == WL_CONNECTED ? "WiFi" : "offline")), 84);
     drawHomeItem(HOME_ITEM_SCRIPTS, "Scripts Explorer", 100);
@@ -932,9 +937,20 @@ static void drawScriptExplorer() {
     for (int row = 0; row < visibleRows && start + row < itemCount; ++row) {
         int idx = start + row;
         String prefix = idx == g_scriptSelection ? "> " : "  ";
-        printString(prefix + clipped(storedScriptDisplayName(g_scripts[idx]), 24), 52 + row * 20,
+        String label = idx == 0 ? "Update Scripts" : clipped(storedScriptDisplayName(g_scripts[idx - 1]), 24);
+        printString(prefix + label, 52 + row * 20,
             idx == g_scriptSelection ? &FreeMonoBold9pt7b : &FreeMono9pt7b);
     }
+    if (g_scripts.empty()) printString("No scripts installed", 154);
+}
+
+static void drawDeleteConfirm() {
+    g_frame.fillScreen(GxEPD_WHITE);
+    printLine("DELETE LUA?", 24, &FreeMonoBold18pt7b);
+    printString(clipped(storedScriptDisplayName(g_pendingDeletePath), 24), 58, &FreeMonoBold9pt7b);
+    printString("This removes it from badge", 86);
+    printString(String(g_deleteChoice ? "  CANCEL    > DELETE" : "> CANCEL      DELETE"), 128,
+        &FreeMonoBold9pt7b);
 }
 
 static void drawLinkPrompt() {
@@ -4699,10 +4715,14 @@ static void handleButtons() {
     } else if (g_screen == SCREEN_SCRIPT_EXPLORER) {
         if (pressed & BTN_CANCEL) {
             g_screen = SCREEN_STATUS;
-        } else if ((pressed & BTN_LEFT) && !g_scripts.empty()) {
-            deleteStoredScript(g_scripts[g_scriptSelection]);
+        } else if ((pressed & BTN_LEFT) && g_scriptSelection > 0 && g_scriptSelection <= (int)g_scripts.size()) {
+            g_pendingDeletePath = g_scripts[g_scriptSelection - 1];
+            g_deleteChoice = false;
+            g_screen = SCREEN_DELETE_CONFIRM;
+        } else if (pressed & BTN_RIGHT) {
+            syncScripts();
             refreshScriptList();
-        } else if ((pressed & BTN_RIGHT)) {
+        } else if ((pressed & BTN_SELECT) && g_scriptSelection == 0) {
             syncScripts();
             refreshScriptList();
         } else if ((pressed & BTN_SELECT) && g_scriptSelection <= (int)g_scripts.size()) {
@@ -4853,6 +4873,7 @@ void setup() {
     g_needsRedraw = true;
     redraw();
     delay(BOOT_SPLASH_MS);
+    sampleBattery(true);
     g_screen = SCREEN_STATUS;
     g_needsRedraw = true;
     redraw();
@@ -4869,6 +4890,7 @@ void setup() {
 void loop() {
     handleSerial();
     handleButtons();
+    sampleBattery();
 
     // Handle WiFi worker state transitions
     int wr = g_wifiWorkerResult.load();
