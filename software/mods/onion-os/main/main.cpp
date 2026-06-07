@@ -75,6 +75,7 @@ extern "C" {
 #define SERIAL_BAUD 115200
 #define WIFI_CONNECT_TIMEOUT_MS 15000
 #define HANDSHAKE_INTERVAL_MS 30000
+#define PROFILE_REFRESH_INTERVAL_MS 60000
 #define MQTT_RECONNECT_INTERVAL_MS 5000
 #define MQTT_HANDSHAKE_ACCEPT_WINDOW_MS 10000
 #define BOOT_SPLASH_MS 3000
@@ -228,6 +229,7 @@ static bool g_needsRedraw = true;
 static uint8_t g_lastButtons = 0;
 static uint32_t g_lastButtonPoll = 0;
 static uint32_t g_lastHandshake = 0;
+static uint32_t g_lastProfileRefresh = 0;
 static uint32_t g_lastMqttAttempt = 0;
 static uint32_t g_lastWifiAttempt = 0;
 static uint32_t g_mqttHandshakeSentAt = 0;
@@ -1366,7 +1368,7 @@ static void persistBadgeState() {
     g_prefs.putBool("linked", g_identity.linked);
 }
 
-static bool refreshPublicProfile();
+static bool refreshPublicProfile(bool quiet = false);
 
 static bool updateProfileFromObject(cJSON* obj) {
     if (!cJSON_IsObject(obj)) return false;
@@ -1384,18 +1386,36 @@ static bool updateProfileFromObject(cJSON* obj) {
         }
     }
 
-    const char* onionKeys[] = {
-        "onionCount", "onions", "onionPoints", "points", "pointBalance",
-        "currentOnionTokens", "currentOnionPoints", "tokenBalance", "onionTokens", "balance"
-    };
-    for (const char* key : onionKeys) {
-        if (jsonValueString(obj, key, value) && value.length()) {
-            if (g_identity.onionCount != value) {
-                g_identity.onionCount = value;
-                changed = true;
-            }
-            break;
+    // Onion balance. The server sends several balance fields at once — the
+    // resolved display value plus its point/token components. Pick the one the
+    // portal shows, in priority order, instead of a blind first-match: a linked
+    // badge's profile carries BOTH a residual "pointBalance" (e.g. 10) and the
+    // real "currentOnionBalance"/token balance (e.g. 2500), and a naive scan
+    // that hit pointBalance first displayed the wrong number.
+    bool gotBalance = false;
+    if (jsonValueString(obj, "currentOnionBalance", value) && value.length()) {
+        gotBalance = true;  // server's already-resolved display balance
+    } else {
+        String balanceType;
+        if (jsonValueString(obj, "balanceType", balanceType)) {
+            const char* sel = balanceType == "points" ? "currentOnionPoints" : "currentOnionTokens";
+            if (jsonValueString(obj, sel, value) && value.length()) gotBalance = true;
         }
+    }
+    if (!gotBalance) {
+        // Legacy / alternate shapes. Token fields precede point fields, and the
+        // ambiguous pointBalance sub-component is intentionally excluded.
+        const char* onionKeys[] = {
+            "onionCount", "onions", "currentOnionTokens", "tokenBalance",
+            "onionTokens", "currentOnionPoints", "onionPoints", "points", "balance"
+        };
+        for (const char* key : onionKeys) {
+            if (jsonValueString(obj, key, value) && value.length()) { gotBalance = true; break; }
+        }
+    }
+    if (gotBalance && g_identity.onionCount != value) {
+        g_identity.onionCount = value;
+        changed = true;
     }
 
     return changed;
@@ -1916,9 +1936,13 @@ static String urlEncode(const String& value) {
     return out;
 }
 
-static bool refreshPublicProfile() {
+// Fetches the attendee profile (Onion balance, wallet) and updates the badge.
+// quiet=true is for the periodic background refresh: it skips the status-line
+// log on every path and only forces a redraw when the balance actually
+// changed, so an idle badge doesn't flicker its e-paper every interval.
+static bool refreshPublicProfile(bool quiet) {
     if (!g_identity.onionId && !g_identity.username.length()) {
-        setLog("No profile identity");
+        if (!quiet) setLog("No profile identity");
         return false;
     }
 
@@ -1932,15 +1956,16 @@ static bool refreshPublicProfile() {
         code = httpGetString(base + "/api/public/profile/" + urlEncode(g_identity.username), &response);
     }
     if (code < 200 || code >= 300) {
-        setLog("Profile GET failed " + String(code));
+        if (!quiet) setLog("Profile GET failed " + String(code));
         return false;
     }
 
     cJSON* root = cJSON_Parse(response.c_str());
     if (!root) {
-        setLog("Bad profile JSON");
+        if (!quiet) setLog("Bad profile JSON");
         return false;
     }
+    String beforeCount = g_identity.onionCount;
     updateProfileFromJson(root);
     String wallet = jsonString(root, "solanaWalletAddress");
     if (wallet.length() && wallet != g_identity.solanaPublicKey) {
@@ -1948,7 +1973,11 @@ static bool refreshPublicProfile() {
         g_prefs.putString("sol_pub", g_identity.solanaPublicKey);
     }
     cJSON_Delete(root);
-    setLog("Profile refreshed");
+    if (quiet) {
+        if (g_identity.onionCount != beforeCount && !g_luaDisplayActive) g_needsRedraw = true;
+    } else {
+        setLog("Profile refreshed");
+    }
     return true;
 }
 
@@ -4931,6 +4960,7 @@ void setup() {
     }
     ensureWifi();
     doHttpHandshake();
+    refreshPublicProfile();  // pull the current balance once at boot
 }
 
 void loop() {
@@ -4979,6 +5009,18 @@ void loop() {
     if (millis() - g_lastHandshake > HANDSHAKE_INTERVAL_MS) {
         g_lastHandshake = millis();
         if (g_mqttConnected) doMqttHandshake();
+    }
+
+    // Periodic Onion-balance refresh. Handshakes only carry onionId/status, so
+    // without this the displayed balance only updates on a manual "Refresh
+    // Profile" or a fresh link — it goes stale as soon as the server total
+    // changes. Quiet so an idle badge stays silent; skipped while offline or a
+    // WiFi worker is busy so it never blocks the UI.
+    if (WiFi.status() == WL_CONNECTED &&
+        g_wifiWorkerResult.load() != WIFI_WORKER_RUNNING &&
+        millis() - g_lastProfileRefresh > PROFILE_REFRESH_INTERVAL_MS) {
+        g_lastProfileRefresh = millis();
+        refreshPublicProfile(true);
     }
 
     redraw();
