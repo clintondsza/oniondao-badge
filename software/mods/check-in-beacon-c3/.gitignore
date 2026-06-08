@@ -1,3 +1,4 @@
 main/beacon_config.h
+main/beacon_config.generated.h
 build/
 managed_components/

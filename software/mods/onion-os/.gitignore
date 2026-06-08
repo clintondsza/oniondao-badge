@@ -4,3 +4,4 @@ sdkconfig
 sdkconfig.old
 managed_components/
 dependencies.lock
+main/onion_config.generated.h

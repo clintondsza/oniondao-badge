@@ -2,8 +2,8 @@
 
 // Copy to main/beacon_config.h for local credentials. That file is gitignored.
 
-#define BEACON_WIFI_SSID "CHANGE_ME"
-#define BEACON_WIFI_PASSWORD "CHANGE_ME"
+#define BEACON_WIFI_SSID "CIC Guest"
+#define BEACON_WIFI_PASSWORD "1nnovation"
 
 // Server endpoint that accepts check-in POSTs from this beacon.
 #define BEACON_SERVER_URL "https://oniondao.dev/api/badge/checkin"
@@ -12,7 +12,7 @@
 #define BEACON_SERVER_CA_PEM ""
 
 // Optional bearer token for BEACON_SERVER_URL.
-#define BEACON_SHARED_SECRET "CHANGE_ME"
+#define BEACON_SHARED_SECRET "02eb3d5e04fd2dc9cbb6f3f5c6c9d89d9c96acd987cc24ddf9f717f9480e8786"
 
 // Identity shown to badges and included in server POSTs.
 #define BEACON_ID "beacon-c3-001"
@@ -22,7 +22,7 @@
 // ESP-NOW and proximity tuning.
 // ESP-NOW must run on the same channel as the WiFi AP when WiFi is connected.
 #define BEACON_ESPNOW_CHANNEL 6
-#define BEACON_RSSI_THRESHOLD_DBM -65
+#define BEACON_RSSI_THRESHOLD_DBM -50
 #define BEACON_ADVERTISE_INTERVAL_MS 1000
 
 // Used in result packets when the server does not return a points value.

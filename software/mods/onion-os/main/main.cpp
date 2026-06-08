@@ -39,7 +39,9 @@ extern "C" {
 #include <string>
 #include <vector>
 
-#if __has_include("onion_config.h")
+#if __has_include("onion_config.generated.h")
+#include "onion_config.generated.h"
+#elif __has_include("onion_config.h")
 #include "onion_config.h"
 #else
 #define ONION_DEFAULT_WIFI_SSID ""
@@ -56,12 +58,24 @@ extern "C" {
 #include "badge_pins.h"
 #include "logo_bitmap.h"
 
+#ifndef ONION_HARDCODED_WIFI_SSID
 #define ONION_HARDCODED_WIFI_SSID "CIC Guest"
+#endif
+#ifndef ONION_HARDCODED_WIFI_PASSWORD
 #define ONION_HARDCODED_WIFI_PASSWORD "1nnovation"
+#endif
+#ifndef ONION_HARDCODED_SERVER_BASE_URL
 #define ONION_HARDCODED_SERVER_BASE_URL "https://oniondao.dev"
+#endif
+#ifndef ONION_HARDCODED_MQTT_URI
 #define ONION_HARDCODED_MQTT_URI "mqtt://shortline.proxy.rlwy.net:20928"
+#endif
+#ifndef ONION_HARDCODED_MQTT_USERNAME
 #define ONION_HARDCODED_MQTT_USERNAME "oniondao"
+#endif
+#ifndef ONION_HARDCODED_MQTT_PASSWORD
 #define ONION_HARDCODED_MQTT_PASSWORD "02eb3d5e04fd2dc9cbb6f3f5c6c9d89d9c96acd987cc24ddf9f717f9480e8786"
+#endif
 
 #define TCA9534_ADDR   0x20
 #define TCA9534_INPUT  0x00

@@ -8,15 +8,17 @@
 #include <cJSON.h>
 #include <string.h>
 
-#if __has_include("beacon_config.h")
+#if __has_include("beacon_config.generated.h")
+#include "beacon_config.generated.h"
+#elif __has_include("beacon_config.h")
 #include "beacon_config.h"
 #endif
 
 #ifndef BEACON_WIFI_SSID
-#define BEACON_WIFI_SSID "CHANGE_ME"
+#define BEACON_WIFI_SSID "CIC Guest"
 #endif
 #ifndef BEACON_WIFI_PASSWORD
-#define BEACON_WIFI_PASSWORD "CHANGE_ME"
+#define BEACON_WIFI_PASSWORD "1nnovation"
 #endif
 #ifndef BEACON_SERVER_URL
 #define BEACON_SERVER_URL "https://oniondao.dev/api/badge/checkin"
@@ -25,7 +27,7 @@
 #define BEACON_SERVER_CA_PEM ""
 #endif
 #ifndef BEACON_SHARED_SECRET
-#define BEACON_SHARED_SECRET "CHANGE_ME"
+#define BEACON_SHARED_SECRET "02eb3d5e04fd2dc9cbb6f3f5c6c9d89d9c96acd987cc24ddf9f717f9480e8786"
 #endif
 #ifndef BEACON_ID
 #define BEACON_ID "beacon-c3-001"
@@ -40,7 +42,7 @@
 #define BEACON_ESPNOW_CHANNEL 6
 #endif
 #ifndef BEACON_RSSI_THRESHOLD_DBM
-#define BEACON_RSSI_THRESHOLD_DBM -65
+#define BEACON_RSSI_THRESHOLD_DBM -75
 #endif
 #ifndef BEACON_ESPNOW_PMK
 #define BEACON_ESPNOW_PMK "onion-checkin-01"
