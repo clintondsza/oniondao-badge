@@ -218,6 +218,30 @@ Scripts receive a small global `onion` table:
 - `onion.wifi_reconnect()` restores the normal PHY and reconnects to the
   stored AP. The firmware also restores the PHY automatically on its own next
   connection attempt after the script exits.
+
+### Room Check-ins
+
+Onion OS listens for trusted room beacons while WiFi is connected. Beacons use
+ESP-NOW on the room AP's channel and broadcast a compact `ONCHK1` advertisement
+containing beacon ID, room, label, RSSI threshold, and nonce. When the received
+RSSI is strong enough, the badge shows a native `CHECK IN?` prompt.
+
+If the user presses SELECT, the badge sends an ESP-NOW approval packet back to
+the beacon with hardware ID, Onion ID, username, wallet public key, RSSI, badge
+MAC, and the advertisement nonce. The beacon relays that payload to
+`POST /api/badge/checkin`; the server decides whether a workshop is active in
+that room and awards attendance points idempotently. The beacon can send a
+result packet back so the badge displays whether points were awarded.
+
+Packet layout is shared with `software/mods/checkin-beacon`:
+
+```c
+magic = "ONCHK1", version = 1
+type 1 advertise: header, beaconId[32], room[32], label[48], minRssi, nonce[8], sequence
+type 2 approve:   header, beaconId[32], nonce[8], hardwareId[65], onionId,
+                  username[32], wallet[48], rssi, approvedAt, badgeMac[6]
+type 3 result:    header, beaconId[32], nonce[8], awarded, points, message[80]
+```
 - `onion.http_get(url, options)` performs an HTTPS GET (server certificates are
   verified against the bundled root CAs) and returns `{ status, body }`, or
   `nil` plus an error string. `options` is optional and may contain `headers`

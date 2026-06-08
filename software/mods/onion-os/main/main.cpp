@@ -109,6 +109,10 @@ extern "C" {
 #define ONION_LUA_MQTT_MAX_PAYLOAD 512
 #define ONION_LUA_MQTT_QUEUE_LEN 8
 #define ONION_LUA_MQTT_MAX_SUBS 8
+#define ONION_CHECKIN_SCAN_INTERVAL_MS 5000
+#define ONION_CHECKIN_PROMPT_COOLDOWN_MS 300000
+#define ONION_CHECKIN_RESULT_MS 15000
+#define ONION_CHECKIN_DEFAULT_MIN_RSSI -62
 // Swappable side-port modules (see docs/MODULES.md). CC1101 and the Sound
 // module share the same physical pins, so only one may be active at a time.
 #define CC1101_XOSC_MHZ 26.0
@@ -147,6 +151,8 @@ enum Screen : uint8_t {
     SCREEN_LINK_PROMPT,
     SCREEN_TX_PROMPT,
     SCREEN_LUA_PROMPT,
+    SCREEN_CHECKIN_PROMPT,
+    SCREEN_CHECKIN_RESULT,
     SCREEN_LOG,
     SCREEN_SETTINGS,
     SCREEN_WIFI_OVERVIEW,
@@ -215,11 +221,32 @@ struct LuaScriptPrompt {
     bool active = false;
 };
 
+struct CheckInPrompt {
+    String beaconId;
+    String room;
+    String label;
+    uint8_t beaconMac[6] = {};
+    uint8_t nonce[8] = {};
+    int8_t rssi = 0;
+    int8_t minRssi = ONION_CHECKIN_DEFAULT_MIN_RSSI;
+    bool active = false;
+};
+
+struct CheckInResult {
+    String beaconId;
+    String message;
+    int points = 0;
+    bool awarded = false;
+    uint32_t shownAt = 0;
+};
+
 static RuntimeConfig g_config;
 static BadgeIdentity g_identity;
 static LinkPrompt g_linkPrompt;
 static TransactionPrompt g_txPrompt;
 static LuaScriptPrompt g_luaPrompt;
+static CheckInPrompt g_checkinPrompt;
+static CheckInResult g_checkinResult;
 static Preferences g_prefs;
 static esp_mqtt_client_handle_t g_mqtt = nullptr;
 static bool g_mqttConnected = false;
@@ -232,6 +259,8 @@ static uint32_t g_lastHandshake = 0;
 static uint32_t g_lastProfileRefresh = 0;
 static uint32_t g_lastMqttAttempt = 0;
 static uint32_t g_lastWifiAttempt = 0;
+static uint32_t g_lastCheckInScan = 0;
+static uint32_t g_lastCheckInPromptAt = 0;
 static uint32_t g_mqttHandshakeSentAt = 0;
 static bool g_mqttHandshakePending = false;
 static String g_log = "Booting";
@@ -316,6 +345,72 @@ static const LuaButton kLuaButtons[] = {
 
 static const uint8_t kEspNowBroadcastMac[6] = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
 
+enum CheckInPacketType : uint8_t {
+    CHECKIN_PACKET_ADVERTISE = 1,
+    CHECKIN_PACKET_APPROVE = 2,
+    CHECKIN_PACKET_RESULT = 3,
+};
+
+static const char kCheckInMagic[6] = {'O', 'N', 'C', 'H', 'K', '1'};
+static const uint8_t kCheckInVersion = 1;
+
+struct __attribute__((packed)) CheckInPacketHeader {
+    char magic[6];
+    uint8_t version;
+    uint8_t type;
+};
+
+struct __attribute__((packed)) CheckInAdvertisePacket {
+    CheckInPacketHeader header;
+    char beaconId[32];
+    char room[32];
+    char label[48];
+    int8_t minRssi;
+    uint8_t nonce[8];
+    uint32_t sequence;
+};
+
+struct __attribute__((packed)) CheckInApprovePacket {
+    CheckInPacketHeader header;
+    char beaconId[32];
+    uint8_t nonce[8];
+    char hardwareId[65];
+    uint64_t onionId;
+    char username[32];
+    char wallet[48];
+    int8_t rssi;
+    uint32_t approvedAt;
+    uint8_t badgeMac[6];
+};
+
+struct __attribute__((packed)) CheckInResultPacket {
+    CheckInPacketHeader header;
+    char beaconId[32];
+    uint8_t nonce[8];
+    uint8_t awarded;
+    uint16_t points;
+    char message[80];
+};
+
+struct CheckInPendingOffer {
+    uint8_t beaconMac[6] = {};
+    char beaconId[33] = {};
+    char room[33] = {};
+    char label[49] = {};
+    uint8_t nonce[8] = {};
+    int8_t rssi = 0;
+    int8_t minRssi = ONION_CHECKIN_DEFAULT_MIN_RSSI;
+    uint32_t seenAt = 0;
+};
+
+struct CheckInPendingResult {
+    char beaconId[33] = {};
+    uint8_t nonce[8] = {};
+    bool awarded = false;
+    uint16_t points = 0;
+    char message[81] = {};
+};
+
 static bool g_espnowStarted = false;
 static uint32_t g_espnowSent = 0;
 static uint32_t g_espnowReceived = 0;
@@ -323,6 +418,14 @@ static portMUX_TYPE g_espnowMux = portMUX_INITIALIZER_UNLOCKED;
 static EspNowQueuedMessage g_espnowQueue[ONION_ESPNOW_QUEUE_LEN];
 static uint8_t g_espnowQueueHead = 0;
 static uint8_t g_espnowQueueCount = 0;
+static portMUX_TYPE g_checkinMux = portMUX_INITIALIZER_UNLOCKED;
+static CheckInPendingOffer g_checkinPendingOffer;
+static CheckInPendingResult g_checkinPendingResult;
+static bool g_checkinOfferPending = false;
+static bool g_checkinResultPending = false;
+static String g_lastCheckInBeaconId;
+
+static bool refreshPublicProfile(bool quiet);
 
 struct MqttQueuedMessage {
     char topic[ONION_LUA_MQTT_MAX_TOPIC + 1] = {};
@@ -889,6 +992,30 @@ static void drawLuaPrompt() {
     printString("Size: " + String(g_luaPrompt.sizeBytes) + " bytes", 116);
 }
 
+static void drawCheckInPrompt() {
+    g_frame.fillScreen(GxEPD_WHITE);
+    printLine("CHECK IN?", 24, &FreeMonoBold18pt7b);
+    printString(clipped(g_checkinPrompt.label.length() ? g_checkinPrompt.label : "Workshop attendance", 25),
+        54, &FreeMonoBold9pt7b);
+    printString("Room: " + clipped(g_checkinPrompt.room.length() ? g_checkinPrompt.room : g_checkinPrompt.beaconId, 21), 78);
+    printString("Signal: " + String((int)g_checkinPrompt.rssi) + " dBm", 100);
+    printString("SELECT yes", 138, &FreeMonoBold9pt7b);
+    printString("CANCEL no", 158);
+}
+
+static void drawCheckInResult() {
+    g_frame.fillScreen(GxEPD_WHITE);
+    printLine(g_checkinResult.awarded ? "CHECKED IN" : "CHECK IN", 24, &FreeMonoBold18pt7b);
+    if (g_checkinResult.points > 0) {
+        printString("Points: +" + String(g_checkinResult.points), 54, &FreeMonoBold9pt7b);
+        printString(clipped(g_checkinResult.message, 27), 78);
+    } else {
+        printString(clipped(g_checkinResult.message.length() ? g_checkinResult.message : "Waiting for beacon...", 27),
+            58, &FreeMonoBold9pt7b);
+    }
+    printString("SELECT/CANCEL to close", 142);
+}
+
 // Forward declarations for WiFi screens (defined after ensureWifi)
 static void drawSettingsScreen();
 static void drawWifiOverview();
@@ -974,6 +1101,8 @@ static void redraw() {
     else if (g_screen == SCREEN_SCRIPT_EXPLORER) drawScriptExplorer();
     else if (g_screen == SCREEN_TX_PROMPT)       drawTransactionPrompt();
     else if (g_screen == SCREEN_LUA_PROMPT)      drawLuaPrompt();
+    else if (g_screen == SCREEN_CHECKIN_PROMPT)  drawCheckInPrompt();
+    else if (g_screen == SCREEN_CHECKIN_RESULT)  drawCheckInResult();
     else if (g_screen == SCREEN_SETTINGS)        drawSettingsScreen();
     else if (g_screen == SCREEN_WIFI_OVERVIEW)   drawWifiOverview();
     else if (g_screen == SCREEN_WIFI_SCANNING)   drawWifiScanning();
@@ -2387,6 +2516,75 @@ static bool espnowQueuePop(EspNowQueuedMessage& out) {
     return hasMessage;
 }
 
+static void copyBounded(char* dst, size_t dstLen, const char* src, size_t srcLen) {
+    if (!dst || dstLen == 0) return;
+    size_t n = 0;
+    if (src && srcLen) {
+        while (n + 1 < dstLen && n < srcLen && src[n] != '\0') {
+            dst[n] = src[n];
+            n++;
+        }
+    }
+    dst[n] = '\0';
+}
+
+static void copyStringToField(char* dst, size_t dstLen, const String& value) {
+    if (!dst || dstLen == 0) return;
+    size_t n = value.length();
+    if (n >= dstLen) n = dstLen - 1;
+    memcpy(dst, value.c_str(), n);
+    dst[n] = '\0';
+    if (n + 1 < dstLen) memset(dst + n + 1, 0, dstLen - n - 1);
+}
+
+static bool checkInHeaderMatches(const uint8_t* data, int len, uint8_t type) {
+    if (!data || len < (int)sizeof(CheckInPacketHeader)) return false;
+    const CheckInPacketHeader* header = reinterpret_cast<const CheckInPacketHeader*>(data);
+    return memcmp(header->magic, kCheckInMagic, sizeof(kCheckInMagic)) == 0 &&
+        header->version == kCheckInVersion && header->type == type;
+}
+
+static void checkInMaybeCapturePacket(const esp_now_recv_info_t* info, const uint8_t* data, int len, int8_t rssi) {
+    if (!info || !info->src_addr || !data) return;
+
+    if (len == (int)sizeof(CheckInAdvertisePacket) &&
+        checkInHeaderMatches(data, len, CHECKIN_PACKET_ADVERTISE)) {
+        CheckInAdvertisePacket packet;
+        memcpy(&packet, data, sizeof(packet));
+        int8_t minRssi = packet.minRssi ? packet.minRssi : ONION_CHECKIN_DEFAULT_MIN_RSSI;
+        if (rssi < minRssi) return;
+
+        portENTER_CRITICAL(&g_checkinMux);
+        memcpy(g_checkinPendingOffer.beaconMac, info->src_addr, 6);
+        copyBounded(g_checkinPendingOffer.beaconId, sizeof(g_checkinPendingOffer.beaconId),
+            packet.beaconId, sizeof(packet.beaconId));
+        copyBounded(g_checkinPendingOffer.room, sizeof(g_checkinPendingOffer.room),
+            packet.room, sizeof(packet.room));
+        copyBounded(g_checkinPendingOffer.label, sizeof(g_checkinPendingOffer.label),
+            packet.label, sizeof(packet.label));
+        memcpy(g_checkinPendingOffer.nonce, packet.nonce, sizeof(packet.nonce));
+        g_checkinPendingOffer.rssi = rssi;
+        g_checkinPendingOffer.minRssi = minRssi;
+        g_checkinPendingOffer.seenAt = millis();
+        g_checkinOfferPending = true;
+        portEXIT_CRITICAL(&g_checkinMux);
+    } else if (len == (int)sizeof(CheckInResultPacket) &&
+        checkInHeaderMatches(data, len, CHECKIN_PACKET_RESULT)) {
+        CheckInResultPacket packet;
+        memcpy(&packet, data, sizeof(packet));
+        portENTER_CRITICAL(&g_checkinMux);
+        copyBounded(g_checkinPendingResult.beaconId, sizeof(g_checkinPendingResult.beaconId),
+            packet.beaconId, sizeof(packet.beaconId));
+        memcpy(g_checkinPendingResult.nonce, packet.nonce, sizeof(packet.nonce));
+        g_checkinPendingResult.awarded = packet.awarded != 0;
+        g_checkinPendingResult.points = packet.points;
+        copyBounded(g_checkinPendingResult.message, sizeof(g_checkinPendingResult.message),
+            packet.message, sizeof(packet.message));
+        g_checkinResultPending = true;
+        portEXIT_CRITICAL(&g_checkinMux);
+    }
+}
+
 static void espnowQueuePush(const uint8_t mac[6], const uint8_t* data, int len, int8_t rssi) {
     if (!mac || !data || len <= 0) return;
     if (len > ONION_ESPNOW_MAX_PAYLOAD) len = ONION_ESPNOW_MAX_PAYLOAD;
@@ -2414,6 +2612,7 @@ static void espnowQueuePush(const uint8_t mac[6], const uint8_t* data, int len, 
 static void onEspNowReceive(const esp_now_recv_info_t* info, const uint8_t* data, int len) {
     int8_t rssi = 0;
     if (info && info->rx_ctrl) rssi = info->rx_ctrl->rssi;
+    checkInMaybeCapturePacket(info, data, len, rssi);
     if (info && info->src_addr) espnowQueuePush(info->src_addr, data, len, rssi);
 }
 
@@ -2488,6 +2687,129 @@ static bool ensureEspNow(int requestedChannel, String& error) {
     }
 
     return espnowAddPeer(kEspNowBroadcastMac, 0, error);
+}
+
+static bool screenAllowsCheckInPrompt() {
+    return g_screen == SCREEN_STATUS && !g_luaDisplayActive &&
+        !g_linkPrompt.active && !g_txPrompt.active && !g_luaPrompt.active;
+}
+
+static void showCheckInResult(const String& message, bool awarded = false, int points = 0) {
+    g_checkinResult.message = message;
+    g_checkinResult.awarded = awarded;
+    g_checkinResult.points = points;
+    g_checkinResult.shownAt = millis();
+    g_screen = SCREEN_CHECKIN_RESULT;
+    g_forceFullRefresh = true;
+    g_needsRedraw = true;
+}
+
+static void sendCheckInApproval(bool approve) {
+    g_checkinPrompt.active = false;
+    g_lastCheckInBeaconId = g_checkinPrompt.beaconId;
+    g_lastCheckInPromptAt = millis();
+
+    if (!approve) {
+        setLog("Check-in skipped");
+        g_screen = SCREEN_STATUS;
+        return;
+    }
+
+    CheckInApprovePacket packet = {};
+    memcpy(packet.header.magic, kCheckInMagic, sizeof(kCheckInMagic));
+    packet.header.version = kCheckInVersion;
+    packet.header.type = CHECKIN_PACKET_APPROVE;
+    copyStringToField(packet.beaconId, sizeof(packet.beaconId), g_checkinPrompt.beaconId);
+    memcpy(packet.nonce, g_checkinPrompt.nonce, sizeof(packet.nonce));
+    copyStringToField(packet.hardwareId, sizeof(packet.hardwareId), g_identity.hardwareId);
+    packet.onionId = g_identity.onionId;
+    copyStringToField(packet.username, sizeof(packet.username), g_identity.username);
+    copyStringToField(packet.wallet, sizeof(packet.wallet), g_identity.solanaPublicKey);
+    packet.rssi = g_checkinPrompt.rssi;
+    packet.approvedAt = millis();
+    esp_wifi_get_mac(WIFI_IF_STA, packet.badgeMac);
+
+    String error;
+    if (!ensureEspNow(0, error) || !espnowAddPeer(g_checkinPrompt.beaconMac, 0, error)) {
+        showCheckInResult("Radio failed: " + clipped(error, 15));
+        return;
+    }
+
+    esp_err_t rc = esp_now_send(g_checkinPrompt.beaconMac,
+        reinterpret_cast<const uint8_t*>(&packet), sizeof(packet));
+    if (rc != ESP_OK) {
+        showCheckInResult("Send failed " + String((int)rc));
+        return;
+    }
+
+    setLog("Check-in sent");
+    showCheckInResult("Waiting for server...");
+}
+
+static void processCheckInService() {
+    uint32_t now = millis();
+    if (WiFi.status() == WL_CONNECTED &&
+        g_wifiWorkerResult.load() != WIFI_WORKER_RUNNING &&
+        now - g_lastCheckInScan >= ONION_CHECKIN_SCAN_INTERVAL_MS) {
+        g_lastCheckInScan = now;
+        String error;
+        if (!ensureEspNow(0, error)) {
+            Serial.printf("[onion-os] check-in ESP-NOW unavailable: %s\n", error.c_str());
+        }
+    }
+
+    CheckInPendingResult pendingResult;
+    bool hasResult = false;
+    portENTER_CRITICAL(&g_checkinMux);
+    if (g_checkinResultPending) {
+        pendingResult = g_checkinPendingResult;
+        g_checkinResultPending = false;
+        hasResult = true;
+    }
+    portEXIT_CRITICAL(&g_checkinMux);
+    if (hasResult) {
+        String msg = String(pendingResult.message);
+        if (!msg.length()) msg = pendingResult.awarded ? "Attendance recorded" : "No active workshop";
+        showCheckInResult(msg, pendingResult.awarded, pendingResult.points);
+        if (pendingResult.awarded) refreshPublicProfile(true);
+    }
+
+    if (g_screen == SCREEN_CHECKIN_RESULT &&
+        g_checkinResult.shownAt &&
+        now - g_checkinResult.shownAt > ONION_CHECKIN_RESULT_MS) {
+        g_screen = SCREEN_STATUS;
+        g_needsRedraw = true;
+    }
+
+    CheckInPendingOffer offer;
+    bool hasOffer = false;
+    portENTER_CRITICAL(&g_checkinMux);
+    if (g_checkinOfferPending) {
+        offer = g_checkinPendingOffer;
+        g_checkinOfferPending = false;
+        hasOffer = true;
+    }
+    portEXIT_CRITICAL(&g_checkinMux);
+    if (!hasOffer || !screenAllowsCheckInPrompt()) return;
+
+    String beaconId = String(offer.beaconId);
+    if (!beaconId.length()) beaconId = macToString(offer.beaconMac);
+    if (beaconId == g_lastCheckInBeaconId &&
+        now - g_lastCheckInPromptAt < ONION_CHECKIN_PROMPT_COOLDOWN_MS) {
+        return;
+    }
+
+    g_checkinPrompt.beaconId = beaconId;
+    g_checkinPrompt.room = String(offer.room);
+    g_checkinPrompt.label = String(offer.label);
+    memcpy(g_checkinPrompt.beaconMac, offer.beaconMac, sizeof(g_checkinPrompt.beaconMac));
+    memcpy(g_checkinPrompt.nonce, offer.nonce, sizeof(g_checkinPrompt.nonce));
+    g_checkinPrompt.rssi = offer.rssi;
+    g_checkinPrompt.minRssi = offer.minRssi;
+    g_checkinPrompt.active = true;
+    g_screen = SCREEN_CHECKIN_PROMPT;
+    g_forceFullRefresh = true;
+    setLog("Check-in beacon nearby");
 }
 
 static bool luaCanReadGpio(int pin) {
@@ -4786,6 +5108,13 @@ static void handleButtons() {
     } else if (g_screen == SCREEN_LUA_PROMPT) {
         if (pressed & BTN_SELECT) sendLuaPushResponse(true);
         if (pressed & BTN_CANCEL) sendLuaPushResponse(false);
+    } else if (g_screen == SCREEN_CHECKIN_PROMPT) {
+        if (pressed & BTN_SELECT) sendCheckInApproval(true);
+        if (pressed & BTN_CANCEL) sendCheckInApproval(false);
+    } else if (g_screen == SCREEN_CHECKIN_RESULT) {
+        if (pressed & (BTN_SELECT | BTN_CANCEL)) {
+            g_screen = SCREEN_STATUS;
+        }
     } else if (g_screen == SCREEN_SCRIPT_EXPLORER) {
         if (pressed & BTN_CANCEL) {
             g_screen = SCREEN_STATUS;
@@ -5005,6 +5334,7 @@ void loop() {
         triggerWifiReconnect();
     }
     ensureMqtt();
+    processCheckInService();
 
     if (millis() - g_lastHandshake > HANDSHAKE_INTERVAL_MS) {
         g_lastHandshake = millis();
