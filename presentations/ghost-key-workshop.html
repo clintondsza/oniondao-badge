@@ -1,0 +1,640 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Operation: Ghost Key — Red Team Briefing</title>
+<style>
+  :root{
+    --bg:#0b0d10; --bg2:#111419;
+    --ink:#e9e5d9; --dim:#8b8775; --steel:#7d8590;
+    --gold:#f2b134; --gold-soft:rgba(242,177,52,.14);
+    --red:#ff4d4d; --red-soft:rgba(255,77,77,.12);
+    --cyan:#54d3c6; --cyan-soft:rgba(84,211,198,.12);
+    --grid:rgba(255,255,255,.035);
+    --line:rgba(255,255,255,.13);
+    --mono:"SFMono-Regular","SF Mono","Menlo","Consolas","Liberation Mono","DejaVu Sans Mono",monospace;
+    --serif:Georgia,"Iowan Old Style","Times New Roman",serif;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{height:100%}
+  body{background:var(--bg); color:var(--ink); font-family:var(--serif); overflow:hidden; -webkit-font-smoothing:antialiased;}
+  body::before{content:""; position:fixed; inset:0; z-index:0; pointer-events:none;
+    background-image:linear-gradient(var(--grid) 1px,transparent 1px),linear-gradient(90deg,var(--grid) 1px,transparent 1px);
+    background-size:42px 42px;}
+  body::after{content:""; position:fixed; inset:0; z-index:0; pointer-events:none;
+    background:radial-gradient(120% 90% at 50% 25%,transparent 40%,rgba(0,0,0,.55) 100%);}
+
+  /* chrome */
+  header.bar,footer.bar{position:fixed; left:0; right:0; z-index:30; display:flex; align-items:center; justify-content:space-between;
+    font-family:var(--mono); text-transform:uppercase; letter-spacing:.18em; font-size:11px; color:var(--dim); padding:14px 26px; flex-wrap:wrap; gap:4px 16px;}
+  header.bar{top:0; border-bottom:1px solid var(--line); background:linear-gradient(var(--bg),rgba(11,13,16,.45)); font-size:clamp(15px,1.9vw,24px); padding:14px 32px; letter-spacing:.14em; gap:6px 18px;}
+  footer.bar{bottom:0; border-top:1px solid var(--line); background:linear-gradient(rgba(11,13,16,.4),var(--bg));}
+  .op{color:var(--gold); display:flex; align-items:center; gap:12px; font-size:clamp(14px,1.8vw,23px)} .op b{color:var(--red); font-weight:700}
+  .op .seed{width:clamp(16px,1.9vw,22px);height:auto;opacity:.55}
+  .presenter-hd{display:flex; flex-direction:column; align-items:flex-end; line-height:1.12; gap:3px}
+  .pname{color:var(--ink); font-weight:700; font-size:clamp(17px,2.5vw,32px); letter-spacing:.08em}
+  .ptg{color:var(--steel); text-transform:none; letter-spacing:.03em; font-size:clamp(14px,1.9vw,24px)}
+  .ptg .at{color:var(--gold); font-weight:700}
+  #section{color:var(--steel)}
+  #counter{color:var(--ink)}
+  #progress{position:fixed; left:0; bottom:0; height:2px; width:0; z-index:31; background:linear-gradient(90deg,var(--gold),var(--red)); transition:width .35s ease;}
+  @keyframes flow{to{stroke-dashoffset:-160}}
+
+  /* deck */
+  #deck{position:fixed; inset:0; z-index:10}
+  .slide{position:absolute; inset:0; display:flex; flex-direction:column; justify-content:center;
+    padding:112px clamp(28px,7vw,120px) 80px; opacity:0; visibility:hidden; pointer-events:none; transition:opacity .45s ease;}
+  .slide.active{opacity:1; visibility:visible; pointer-events:auto}
+  .wrap{width:100%; max-width:1080px; margin:0 auto; position:relative; z-index:2}
+
+  .slide.active .wrap>*{animation:rise .5s both}
+  .slide.active .wrap>*:nth-child(1){animation-delay:.04s}
+  .slide.active .wrap>*:nth-child(2){animation-delay:.1s}
+  .slide.active .wrap>*:nth-child(3){animation-delay:.16s}
+  .slide.active .wrap>*:nth-child(4){animation-delay:.22s}
+  .slide.active .wrap>*:nth-child(5){animation-delay:.28s}
+  .slide.active .wrap>*:nth-child(6){animation-delay:.34s}
+  .slide.active .wrap>*:nth-child(7){animation-delay:.4s}
+  .slide.active .wrap>*:nth-child(8){animation-delay:.46s}
+  @keyframes rise{from{opacity:0;transform:translateY(15px)}to{opacity:1;transform:none}}
+
+  .eyebrow{font-family:var(--mono); text-transform:uppercase; letter-spacing:.32em; font-size:clamp(11px,1.3vw,14px);
+    color:var(--gold); margin-bottom:18px; display:flex; align-items:center; gap:12px}
+  .eyebrow::before{content:""; width:26px; height:1px; background:var(--gold); display:inline-block}
+  .eyebrow.red{color:var(--red)} .eyebrow.red::before{background:var(--red)}
+  .eyebrow.cyan{color:var(--cyan)} .eyebrow.cyan::before{background:var(--cyan)}
+
+  h1{font-family:var(--mono); font-weight:700; line-height:1.02; letter-spacing:-.01em; font-size:clamp(2.1rem,6.4vw,4.6rem); text-transform:uppercase;}
+  h2{font-family:var(--mono); font-weight:700; line-height:1.05; letter-spacing:-.005em; font-size:clamp(1.6rem,4.4vw,2.95rem); text-transform:uppercase; margin-bottom:20px}
+  .lede{font-size:clamp(1.05rem,2.4vw,1.6rem); line-height:1.5; color:var(--ink); max-width:50ch; margin-top:8px}
+  p.body{font-size:clamp(.98rem,2vw,1.28rem); line-height:1.55; color:var(--ink); max-width:62ch}
+  .muted{color:var(--steel)} .gold{color:var(--gold)} .redt{color:var(--red)} .cyt{color:var(--cyan)}
+  code,.mono{font-family:var(--mono)} strong{color:#fff;font-weight:700}
+
+  ul.points{list-style:none; margin-top:20px; display:grid; gap:13px}
+  ul.points li{position:relative; padding-left:30px; font-size:clamp(.98rem,2vw,1.3rem); line-height:1.45}
+  ul.points li::before{content:"›"; position:absolute; left:4px; top:-1px; color:var(--gold); font-family:var(--mono); font-weight:700}
+  ul.points.red li::before{color:var(--red)} ul.points.cyan li::before{color:var(--cyan)}
+
+  .grid{display:grid; gap:15px; margin-top:24px}
+  .g3{grid-template-columns:repeat(3,1fr)} .g4{grid-template-columns:repeat(4,1fr)} .g2{grid-template-columns:repeat(2,1fr)}
+  .card{border:1px solid var(--line); background:var(--bg2); padding:18px 17px; border-radius:3px}
+  .card h3{font-family:var(--mono); text-transform:uppercase; letter-spacing:.1em; font-size:clamp(.8rem,1.5vw,1rem); margin-bottom:8px; color:var(--ink)}
+  .card p{font-size:clamp(.84rem,1.55vw,1rem); line-height:1.4; color:var(--steel)}
+  .card .tag{font-family:var(--mono); font-size:11px; letter-spacing:.16em; text-transform:uppercase; color:var(--dim); display:block; margin-bottom:9px}
+  .card.hot{border-color:var(--gold); box-shadow:0 0 0 1px var(--gold-soft) inset, 0 0 40px -28px var(--gold)} .card.hot .tag{color:var(--gold)}
+  .card.danger{border-color:rgba(255,77,77,.5)} .card.danger .tag{color:var(--red)}
+  .card.cool{border-color:rgba(84,211,198,.4)} .card.cool .tag{color:var(--cyan)}
+  .ico{width:26px;height:26px;stroke:var(--gold);fill:none;stroke-width:1.6;margin-bottom:9px}
+  .card.hot .ico{stroke:var(--gold)} .card.danger .ico{stroke:var(--red)}
+
+  .obj{display:grid;grid-template-columns:auto 1fr auto;gap:18px;align-items:center;border:1px solid var(--line);background:var(--bg2);padding:14px 18px;border-radius:3px}
+  .obj+.obj{margin-top:11px}
+  .obj .n{font-family:var(--mono);font-size:clamp(1.3rem,2.8vw,1.9rem);font-weight:700;color:var(--gold);min-width:1.6em}
+  .obj .t{font-family:var(--mono);text-transform:uppercase;letter-spacing:.08em;font-size:clamp(.92rem,1.8vw,1.15rem)}
+  .obj .d{font-size:clamp(.84rem,1.55vw,1rem);color:var(--steel);margin-top:3px;text-transform:none;letter-spacing:0;font-family:var(--serif)}
+  .obj .lvl{font-family:var(--mono);font-size:10px;letter-spacing:.16em;color:var(--dim);text-transform:uppercase;text-align:right}
+  .obj.t3{border-color:var(--red)} .obj.t3 .n{color:var(--red)} .obj.t3 .lvl{color:var(--red)}
+
+  ol.steps{counter-reset:s;list-style:none;margin-top:20px;display:grid;gap:11px}
+  ol.steps li{counter-increment:s;position:relative;padding-left:46px;font-size:clamp(.95rem,1.85vw,1.2rem);line-height:1.4}
+  ol.steps li::before{content:counter(s,decimal-leading-zero);position:absolute;left:0;top:0;font-family:var(--mono);font-size:.82em;color:var(--bg);background:var(--gold);width:30px;height:30px;display:grid;place-items:center;border-radius:2px;font-weight:700}
+
+  .note{font-family:var(--mono);font-size:clamp(.7rem,1.35vw,.84rem);letter-spacing:.04em;color:var(--dim);margin-top:20px;border-left:2px solid var(--gold);padding:8px 0 8px 14px;text-transform:uppercase;line-height:1.5}
+  .note.red{border-color:var(--red);color:#caa} .note.cyan{border-color:var(--cyan);color:#9cc}
+
+  /* codes */
+  .codes{display:flex;gap:9px;flex-wrap:wrap;margin-top:9px}
+  .chip{font-family:var(--mono);font-size:clamp(.82rem,1.6vw,1.05rem);letter-spacing:.1em;border:1px solid var(--line);padding:7px 13px;border-radius:3px;background:#15191f}
+  .chip.same{color:var(--red);border-color:rgba(255,77,77,.45)} .chip.diff{color:var(--gold);border-color:rgba(242,177,52,.4)}
+
+  /* spectrum */
+  .spectrum{margin-top:24px;border:1px solid var(--line);border-radius:3px;background:var(--bg2);padding:20px 18px 14px}
+  .specbar{position:relative;height:50px;border-radius:2px;background:linear-gradient(90deg,#15191f,#1c2127 50%,#15191f);border:1px solid var(--line);overflow:hidden}
+  .specbar .band{position:absolute;top:0;bottom:0;background:var(--gold-soft);border-left:1px solid var(--gold);border-right:1px solid var(--gold)}
+  .specbar .lab{position:absolute;top:5px;font-family:var(--mono);font-size:11px;color:var(--gold);letter-spacing:.08em;transform:translateX(-50%)}
+  .specbar .tick{position:absolute;bottom:5px;font-family:var(--mono);font-size:10px;color:var(--steel);transform:translateX(-50%)}
+  .specrow{display:flex;justify-content:space-between;margin-top:11px;font-family:var(--mono);font-size:clamp(.68rem,1.35vw,.8rem);color:var(--steel);letter-spacing:.05em;text-transform:uppercase;flex-wrap:wrap;gap:4px}
+
+  /* flow */
+  .flow{display:grid;grid-template-columns:1fr auto 1fr auto 1fr;align-items:center;gap:6px;margin-top:28px}
+  .flow .node{border:1px solid var(--line);background:var(--bg2);border-radius:3px;padding:16px 12px;text-align:center}
+  .flow .node .t{font-family:var(--mono);text-transform:uppercase;letter-spacing:.08em;font-size:clamp(.8rem,1.6vw,1.05rem)}
+  .flow .node .s{font-size:clamp(.72rem,1.4vw,.9rem);color:var(--steel);margin-top:5px}
+  .flow .node.you{border-color:var(--red);box-shadow:0 0 0 1px var(--red-soft) inset} .flow .node.you .t{color:var(--red)}
+  .flow .node.vault{border-color:var(--gold)} .flow .node.vault .t{color:var(--gold)}
+  .flow .arr{font-family:var(--mono);color:var(--dim);font-size:1.3rem;text-align:center}
+
+  svg.diagram{width:100%;height:auto;display:block;margin-top:14px}
+
+  /* glossary */
+  .gloss{display:grid;grid-template-columns:1fr 1fr;gap:11px 30px;margin-top:22px}
+  .gloss .term{display:grid;grid-template-columns:auto 1fr;gap:12px;align-items:baseline;padding-bottom:9px;border-bottom:1px solid rgba(255,255,255,.06)}
+  .gloss dt{font-family:var(--mono);color:var(--gold);font-size:clamp(.82rem,1.5vw,1rem);text-transform:uppercase;letter-spacing:.04em;white-space:nowrap}
+  .gloss dd{font-size:clamp(.8rem,1.5vw,.98rem);color:var(--steel);line-height:1.35}
+
+  /* math */
+  .eq{font-family:var(--mono);background:#13171d;border:1px solid var(--line);border-left:3px solid var(--cyan);border-radius:3px;
+    padding:14px 18px;margin-top:14px;font-size:clamp(.9rem,2vw,1.3rem);color:var(--ink);letter-spacing:.02em;line-height:1.7;overflow-x:auto}
+  .eq .c{color:var(--cyan)} .eq .small{font-size:.78em;color:var(--steel);display:block;margin-top:4px;letter-spacing:0}
+  .eqlabel{font-family:var(--mono);font-size:clamp(.72rem,1.4vw,.86rem);color:var(--gold);text-transform:uppercase;letter-spacing:.1em;margin-top:18px}
+
+  /* comparison */
+  .cmp{margin-top:22px;border:1px solid var(--line);border-radius:3px;overflow:hidden}
+  .cmp .row{display:grid;grid-template-columns:1.15fr 1fr 1fr;border-top:1px solid rgba(255,255,255,.07)}
+  .cmp .row:first-child{border-top:none}
+  .cmp .row>div{padding:12px 16px;font-size:clamp(.82rem,1.55vw,1.04rem);line-height:1.35}
+  .cmp .row .att{color:var(--steel);font-family:var(--mono);text-transform:uppercase;letter-spacing:.04em;font-size:clamp(.74rem,1.4vw,.9rem);background:#0f1318}
+  .cmp .head>div{font-family:var(--mono);text-transform:uppercase;letter-spacing:.12em;font-weight:700;font-size:clamp(.78rem,1.5vw,1rem);background:#13171d}
+  .cmp .head .rf{color:var(--gold)} .cmp .head .au{color:var(--cyan)}
+  .cmp .rfcol{border-left:1px solid rgba(242,177,52,.18)} .cmp .aucol{border-left:1px solid rgba(84,211,198,.18);color:var(--ink)}
+  .shared{font-family:var(--mono);text-transform:uppercase;letter-spacing:.08em;font-size:clamp(.74rem,1.45vw,.92rem);color:var(--ink);
+    background:var(--gold-soft);border:1px solid rgba(242,177,52,.3);border-radius:3px;padding:11px 15px;margin-top:20px;text-align:center}
+
+  /* demo cue */
+  .democue{position:absolute;top:0;right:0;display:inline-flex;align-items:center;gap:8px;font-family:var(--mono);
+    text-transform:uppercase;letter-spacing:.16em;font-size:11px;color:var(--red);border:1px solid var(--red);
+    background:var(--red-soft);padding:6px 11px;border-radius:3px;z-index:3}
+  .democue::before{content:"";width:0;height:0;border-left:7px solid var(--red);border-top:5px solid transparent;border-bottom:5px solid transparent}
+  .democue.cyan{color:var(--cyan);border-color:var(--cyan);background:var(--cyan-soft)} .democue.cyan::before{border-left-color:var(--cyan)}
+
+  /* onion easter eggs */
+  .onion{position:absolute;width:30px;height:auto;color:var(--gold);opacity:.06;pointer-events:none;z-index:1;transition:opacity .4s,filter .4s}
+  .onion path{fill:none;stroke:currentColor;stroke-width:1.3}
+  body.peel .onion{opacity:.55;filter:drop-shadow(0 0 7px var(--gold))}
+  .peelmsg{position:fixed;bottom:54px;left:50%;transform:translateX(-50%);z-index:35;font-family:var(--mono);font-size:11px;
+    letter-spacing:.14em;text-transform:uppercase;color:var(--gold);opacity:0;transition:opacity .4s;pointer-events:none}
+  body.peel .peelmsg{opacity:.8}
+
+  /* title slides */
+  #t1,#tEnd{padding:0;display:flex;align-items:center;justify-content:center;text-align:left}
+  .stamp{position:absolute;top:120px;right:clamp(28px,7vw,120px);border:2px solid var(--red);color:var(--red);font-family:var(--mono);
+    text-transform:uppercase;letter-spacing:.2em;font-size:12px;font-weight:700;padding:8px 14px;transform:rotate(7deg);opacity:.92;line-height:1.4;text-align:center;z-index:3}
+  #t1 h1{font-size:clamp(2.6rem,11vw,7.4rem);line-height:.92} #t1 h1 .l2{color:var(--red)}
+  .tagline{font-size:clamp(1.05rem,2.7vw,1.85rem);color:var(--ink);margin-top:22px;max-width:32ch}
+  .subhint{font-family:var(--mono);font-size:clamp(.66rem,1.3vw,.8rem);color:var(--dim);letter-spacing:.16em;text-transform:uppercase;margin-top:14px}
+  .meta{font-family:var(--mono);text-transform:uppercase;letter-spacing:.18em;font-size:clamp(.68rem,1.3vw,.82rem);color:var(--dim);margin-top:36px;display:flex;gap:24px;flex-wrap:wrap}
+  .meta span{display:flex;gap:8px} .meta b{color:var(--gold);font-weight:400}
+  .bigwave{position:absolute;left:0;right:0;bottom:96px;height:120px;opacity:.18;pointer-events:none;z-index:1}
+  .bigwave path{stroke:var(--gold);stroke-width:1.5;fill:none;stroke-dasharray:4 8;animation:flow 9s linear infinite}
+
+  .nav{position:fixed;bottom:14px;z-index:32;display:flex;gap:8px;left:50%;transform:translateX(-50%)}
+  .nav button{font-family:var(--mono);background:#15191f;color:var(--dim);border:1px solid var(--line);width:34px;height:30px;border-radius:3px;cursor:pointer;font-size:14px;transition:.15s}
+  .nav button:hover{color:var(--gold);border-color:var(--gold)}
+
+  @media (max-width:760px){
+    .g3,.g4{grid-template-columns:1fr 1fr} .gloss{grid-template-columns:1fr}
+    .flow{grid-template-columns:1fr;gap:10px}.flow .arr{transform:rotate(90deg)}
+    .obj{grid-template-columns:auto 1fr}.obj .lvl{display:none}
+    .cmp .row{grid-template-columns:1fr} .cmp .head{display:none}
+    .slide{padding:104px 22px 86px}
+  }
+</style>
+</head>
+<body>
+
+<!-- reusable onion symbol -->
+<svg width="0" height="0" style="position:absolute"><symbol id="onion" viewBox="0 0 32 40">
+  <path d="M16 9 C9.5 9 6 16 6 24.5 C6 34 11 38.5 16 38.5 C21 38.5 26 34 26 24.5 C26 16 22.5 9 16 9 Z"/>
+  <path d="M16 9 C14.5 5.5 15.5 3.5 13.5 1.5 M16 9 C17.5 5.5 16.5 3.5 18.5 1.5"/>
+  <path d="M11.5 13 C9.5 19 9.5 31 13 37 M20.5 13 C22.5 19 22.5 31 19 37"/>
+</symbol></svg>
+
+<header class="bar">
+  <div class="op"><svg class="seed" viewBox="0 0 32 40"><use href="#onion"/></svg>OPERATION: <b>GHOST KEY</b></div>
+  <div class="presenter-hd">
+    <span class="pname">David Steinberg</span>
+    <span class="ptg"><span class="at">@dsteinberg</span> · Telegram</span>
+  </div>
+</header>
+
+<footer class="bar">
+  <div id="section">FIELD BRIEFING</div>
+  <div id="counter">01 / 22</div>
+</footer>
+<div id="progress"></div>
+<div class="peelmsg">🧅 layers revealed</div>
+<div class="nav"><button id="prev">‹</button><button id="next">›</button></div>
+
+<main id="deck">
+
+  <!-- 1 TITLE -->
+  <section class="slide active" data-section="Field Briefing" id="t1">
+    <div class="stamp">Red Team<br>Eyes Only</div>
+    <div class="wrap">
+      <div class="eyebrow">Null City // RF + Signals Track</div>
+      <h1>Ghost<br><span class="l2">Key</span></h1>
+      <div class="tagline">Cloning a key you <span class="redt">can't see</span> — and the math that quietly tracks you.</div>
+      <div class="subhint">// some keys have layers</div>
+      <div class="meta"><span>FILE <b>// SUBGHZ-01</b></span><span>CLEARANCE <b>// ATTACKER</b></span><span>SESSION <b>// 01 OF 02</b></span></div>
+    </div>
+    <div class="bigwave"><svg viewBox="0 0 1200 120" preserveAspectRatio="none"><path d="M0,60 Q60,10 120,60 T240,60 T360,60 T480,60 T600,60 T720,60 T840,60 T960,60 T1080,60 T1200,60"/></svg></div>
+  </section>
+
+  <!-- 2 THE JOB -->
+  <section class="slide" data-section="The Job">
+    <svg class="onion" style="bottom:90px;right:60px" viewBox="0 0 32 40"><use href="#onion"/></svg>
+    <div class="wrap">
+      <div class="eyebrow">The Job</div>
+      <h2>There's a vault.<br>It only opens for one person.</h2>
+      <p class="body">The bank manager never touches the vault. They walk up and it opens — because their <span class="gold">key announces who they are over the air</span>. No contact. No keyhole. Just a signal.</p>
+      <ul class="points red"><li>The vault = a device listening for the right proof.</li><li>The key = whatever the manager carries that <em>is</em> that proof.</li><li><strong>Your job:</strong> become the manager. Copy the key without ever holding it.</li></ul>
+      <div class="note red">Mission objective // Replicate the credential. Open the vault.</div>
+    </div>
+  </section>
+
+  <!-- 3 WHAT IS A KEY -->
+  <section class="slide" data-section="Concept // Authentication">
+    <div class="wrap">
+      <div class="eyebrow cyan">What A "Key" Really Is</div>
+      <h2>Every key is just<br>proof of identity</h2>
+      <p class="body">Security folks sort that proof into <span class="cyt">factors</span>. Stack more than one — layer them — and you get <strong>multi-factor authentication</strong>: the reason your bank wants a password <em>and</em> your phone.</p>
+      <div class="grid g4">
+        <div class="card"><svg class="ico" viewBox="0 0 24 24"><rect x="3" y="11" width="18" height="10" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg><span class="tag">Something you</span><h3>Know</h3><p>A password, a PIN, a secret phrase.</p></div>
+        <div class="card hot"><svg class="ico" viewBox="0 0 24 24"><circle cx="8" cy="15" r="4"/><path d="M11 13l9-9M17 7l3-3M14 10l2 2"/></svg><span class="tag">Something you</span><h3>Have</h3><p>A token, a fob — or a <span class="gold">radio signal</span>.</p></div>
+        <div class="card"><svg class="ico" viewBox="0 0 24 24"><path d="M12 2a5 5 0 0 0-5 5c0 3 5 9 5 9s5-6 5-9a5 5 0 0 0-5-5z"/><circle cx="12" cy="7" r="1.6"/></svg><span class="tag">Something you</span><h3>Are</h3><p>A fingerprint, a face, a voice.</p></div>
+        <div class="card hot"><svg class="ico" viewBox="0 0 24 24"><path d="M12 21s7-6.2 7-12a7 7 0 1 0-14 0c0 5.8 7 12 7 12z"/><circle cx="12" cy="9" r="2.4"/></svg><span class="tag">Somewhere you</span><h3>Are</h3><p>A place. A position in a room.</p></div>
+      </div>
+      <div class="note">The manager's key = <span class="gold">HAVE</span> (a radio code) + <span class="gold">WHERE</span> (the right spot). Clone it = copy every layer.</div>
+    </div>
+  </section>
+
+  <!-- 4 DISSECTED -->
+  <section class="slide" data-section="Target // The Key">
+    <svg class="onion" style="top:120px;right:70px" viewBox="0 0 32 40"><use href="#onion"/></svg>
+    <div class="wrap">
+      <div class="eyebrow">Dissecting The Target</div>
+      <h2>The manager's key,<br>taken apart</h2>
+      <div class="grid g2">
+        <div class="card hot"><span class="tag">Factor 1 — Something you HAVE</span><h3 style="font-size:1.35rem;color:var(--gold)">An invisible radio token</h3><p style="margin-top:8px;font-size:1.02rem">Transmits a code on a sub-GHz frequency. The vault hears it and unlocks. <span class="gold">This is what you'll capture and replay today.</span></p></div>
+        <div class="card cool"><span class="tag">Factor 2 — Somewhere you ARE</span><h3 style="font-size:1.35rem;color:var(--cyan)">A position in the room</h3><p style="margin-top:8px;font-size:1.02rem">The key proves <em>where</em> it is. We'll see how devices pin your location — GPS, Bluetooth, even sound — and how the same trick tracks you everywhere.</p></div>
+      </div>
+      <p class="body" style="margin-top:22px">Two factors, two attacks. Let's start with the one you can break today.</p>
+    </div>
+  </section>
+
+  <!-- 5 RF PRIMER -->
+  <section class="slide" data-section="Primer // How Radio Carries Data">
+    <div class="wrap">
+      <div class="eyebrow">Technical Primer · 1 of 3</div>
+      <h2>How a wave<br>carries a secret</h2>
+      <p class="body">Radio is energy wiggling at a <span class="gold">frequency</span>. To send data, you stamp a pattern onto that wiggle — that's <strong>modulation</strong>. The simplest kind is <span class="gold">On-Off Keying (OOK)</span>: signal <strong>on = 1</strong>, signal <strong>off = 0</strong>.</p>
+      <svg class="diagram" viewBox="0 0 700 150" role="img" aria-label="On-off keyed waveform encoding 1 0 1 1 0">
+        <line x1="20" y1="120" x2="690" y2="120" stroke="rgba(255,255,255,.18)"/>
+        <g font-family="var(--mono)" font-size="15" fill="var(--gold)" text-anchor="middle">
+          <text x="80" y="22">1</text><text x="210" y="22">0</text><text x="340" y="22">1</text><text x="470" y="22">1</text><text x="600" y="22">0</text>
+        </g>
+        <!-- ON bursts -->
+        <g stroke="var(--gold)" stroke-width="2">
+          <path fill="none" d="M30,80 Q40,40 50,80 T70,80 T90,80 T110,80 T130,80"/>
+          <path fill="none" d="M290,80 Q300,40 310,80 T330,80 T350,80 T370,80 T390,80"/>
+          <path fill="none" d="M420,80 Q430,40 440,80 T460,80 T480,80 T500,80 T520,80"/>
+        </g>
+        <!-- OFF flats -->
+        <g stroke="var(--red)" stroke-width="2" stroke-dasharray="3 5">
+          <line x1="160" y1="120" x2="260" y2="120"/><line x1="550" y1="120" x2="650" y2="120"/>
+        </g>
+        <rect x="20" y="40" width="660" height="92" fill="none" stroke="rgba(255,255,255,.07)"/>
+      </svg>
+      <div class="note">That on/off pattern is the ENTIRE secret. The captured "OPEN" code is just a list of ons and offs — which is exactly why copying it is easy.</div>
+    </div>
+  </section>
+
+  <!-- 6 RF VOCAB -->
+  <section class="slide" data-section="Primer // Field Vocabulary">
+    <svg class="onion" style="bottom:96px;left:48px" viewBox="0 0 32 40"><use href="#onion"/></svg>
+    <div class="wrap">
+      <div class="eyebrow">Technical Primer · 2 of 3</div>
+      <h2>The vocabulary</h2>
+      <dl class="gloss">
+        <div class="term"><dt>Frequency</dt><dd>Wave cycles per second (Hz). Picks the "channel."</dd></div>
+        <div class="term"><dt>Wavelength</dt><dd>Physical length of one cycle. Higher freq = shorter.</dd></div>
+        <div class="term"><dt>Amplitude</dt><dd>Strength of the wave — how loud / how far.</dd></div>
+        <div class="term"><dt>Carrier</dt><dd>The base frequency you broadcast on.</dd></div>
+        <div class="term"><dt>Modulation</dt><dd>How you write data onto the carrier.</dd></div>
+        <div class="term"><dt>OOK / ASK</dt><dd>On = 1, off = 0. Dead simple, very replayable.</dd></div>
+        <div class="term"><dt>FSK</dt><dd>Flip between two frequencies for 0/1. Sturdier.</dd></div>
+        <div class="term"><dt>Data rate</dt><dd>Bits per second pushed through the air.</dd></div>
+        <div class="term"><dt>ISM bands</dt><dd>License-free frequencies: 433 / 868 / 915 MHz.</dd></div>
+        <div class="term"><dt>RSSI / dBm</dt><dd>How strong a signal you caught.</dd></div>
+        <div class="term"><dt>Antenna</dt><dd>Turns electricity ↔ radio waves. Tuned to a band.</dd></div>
+        <div class="term"><dt>Preamble</dt><dd>A known header so the receiver locks on.</dd></div>
+      </dl>
+    </div>
+  </section>
+
+  <!-- 7 ISM BANDS -->
+  <section class="slide" data-section="Primer // The Hidden World">
+    <div class="wrap">
+      <div class="eyebrow">Technical Primer · 3 of 3</div>
+      <h2>Where sub-GHz lives</h2>
+      <p class="body">The cheap, license-free <span class="gold">sub-GHz bands</span> run a hidden world all around this room right now:</p>
+      <div class="spectrum">
+        <div class="specbar">
+          <div class="band" style="left:8%;width:5%"></div><div class="band" style="left:58%;width:5%"></div><div class="band" style="left:74%;width:5%"></div>
+          <div class="lab" style="left:10.5%">433</div><div class="lab" style="left:60.5%">868</div><div class="lab" style="left:76.5%">915</div>
+          <div class="tick" style="left:2.5%">300 MHz</div><div class="tick" style="left:96%">928 MHz</div>
+        </div>
+        <div class="specrow"><span>Key fobs</span><span>Garage doors</span><span>Doorbells</span><span>Tire sensors</span><span>Smart meters</span><span>Sensors</span></div>
+      </div>
+      <div class="note">Our key transmits at <span class="gold">433.92 MHz</span> — the global workhorse band. The lesson: <span class="gold">you can't see it; that doesn't mean you can't touch it.</span></div>
+    </div>
+  </section>
+
+  <!-- 8 HOW A KEY WORKS -->
+  <section class="slide" data-section="RF Attack // Mechanism">
+    <div class="wrap">
+      <div class="eyebrow">How A Wireless Key Works</div>
+      <h2>Press. Transmit.<br>Check. Unlock.</h2>
+      <p class="body">A fob or garage remote shouts a <span class="gold">code</span>; the receiver checks it and acts. The whole secret is that code — and it comes in two flavors:</p>
+      <div class="grid g2" style="margin-top:22px">
+        <div class="card danger"><span class="tag">Fixed code — the weak one</span><p style="font-size:1.02rem;margin-bottom:6px">The <strong>same code every single time.</strong></p><div class="codes"><span class="chip same">7A3F</span><span class="chip same">7A3F</span><span class="chip same">7A3F</span></div></div>
+        <div class="card hot"><span class="tag">Rolling code — the strong one</span><p style="font-size:1.02rem;margin-bottom:6px">A <strong>new code every press</strong>, synced to the receiver.</p><div class="codes"><span class="chip diff">7A3F</span><span class="chip diff">91C2</span><span class="chip diff">4E0B</span></div></div>
+      </div>
+      <div class="note red">Remember which is which. It's about to decide whether your attack works.</div>
+    </div>
+  </section>
+
+  <!-- 9 CAPTURE & REPLAY -->
+  <section class="slide" data-section="RF Attack // Capture & Replay">
+    <div class="wrap">
+      <div class="democue">Live Demo · Legit Key</div>
+      <div class="eyebrow red">The Attack</div>
+      <h2>Capture &amp; replay</h2>
+      <p class="body">If the code is fixed, <strong>you never have to understand it.</strong> Record the raw on/off pattern, play it back, and the vault can't tell you from the manager.</p>
+      <div class="flow">
+        <div class="node vault"><div class="t">Key</div><div class="s">transmits OPEN</div></div>
+        <div class="arr">))) →</div>
+        <div class="node you"><div class="t">You</div><div class="s">record the signal</div></div>
+        <div class="arr">→ )))</div>
+        <div class="node vault"><div class="t">Vault</div><div class="s">opens. again.</div></div>
+      </div>
+      <p class="body" style="margin-top:24px">No keys forged. No locks picked. You just <span class="redt">copied the air.</span></p>
+    </div>
+  </section>
+
+  <!-- 10 WHY CARS SAFE -->
+  <section class="slide" data-section="RF Attack // The Fix">
+    <svg class="onion" style="top:130px;left:54px" viewBox="0 0 32 40"><use href="#onion"/></svg>
+    <div class="wrap">
+      <div class="eyebrow">Why Your Car Shrugs This Off</div>
+      <h2>Rolling codes<br>kill the replay</h2>
+      <p class="body">Replay a recorded car-fob code and nothing happens — the car already rolled to the <span class="gold">next</span> code. Your recording is spent. That one idea protects nearly every modern vehicle.</p>
+      <ul class="points"><li>Each press = a fresh code, never reused.</li><li>A captured code dies the moment it's seen.</li><li class="muted">(Pros defeat it with fancier tricks — but plain replay is dead.)</li></ul>
+      <div class="note red">Our vault uses a <strong>FIXED</strong> code. That is the door you're about to walk through.</div>
+    </div>
+  </section>
+
+  <!-- 11 MISSION -->
+  <section class="slide" data-section="Hands-On // Your Mission">
+    <div class="wrap">
+      <div class="eyebrow red">Hands-On · Objectives</div>
+      <h2>Your mission:<br>build the tool</h2>
+      <p class="body" style="margin-bottom:6px">The <span class="gold">Vault</span> and <span class="gold">Key</span> are up front; the Key transmits <code>OPEN</code> on <strong>433.92 MHz</strong>. Your badge has the radio — but <span class="redt">no sub-GHz software</span>. So you'll write it yourself (LLMs welcome).</p>
+      <div class="obj"><div class="n">1</div><div><div class="t">Recon</div><div class="d">Code your badge to prove the signal exists — make the invisible visible.</div></div><div class="lvl">Everyone</div></div>
+      <div class="obj"><div class="n">2</div><div><div class="t">Capture</div><div class="d">Record the OPEN pattern off the air.</div></div><div class="lvl">Most</div></div>
+      <div class="obj t3"><div class="n">3</div><div><div class="t">Replay</div><div class="d">Transmit your capture and crack the Vault open.</div></div><div class="lvl">Stretch</div></div>
+      <div class="note">Reach Tier 1 and you've written real RF firmware from scratch. That's the win — Tier 3 is the trophy.</div>
+    </div>
+  </section>
+
+  <!-- 12 PLAYBOOK -->
+  <section class="slide" data-section="Hands-On // What Your Code Does">
+    <div class="wrap">
+      <div class="eyebrow red">Attacker Playbook · Write It Yourself</div>
+      <h2>What your code<br>has to do</h2>
+      <ol class="steps">
+        <li>Init your badge's <strong>CC1101</strong> (find its pins in the badge / Onion OS source).</li>
+        <li>Tune to the target: <code>433.92 MHz</code>, modulation <code>ASK / OOK</code>.</li>
+        <li><strong>Receive</strong> the raw on/off timing when the Key fires.</li>
+        <li><strong>Store</strong> that pattern.</li>
+        <li><strong>Transmit</strong> it back at the Vault.</li>
+      </ol>
+      <div class="grid g2" style="margin-top:18px">
+        <div class="card"><span class="tag">Tools</span><p><span class="gold">OnionDAO Badge</span> · <span class="gold">OnionOS</span> · <span class="gold">LilyGo T-Embed CC1101</span></p></div>
+        <div class="card danger"><span class="tag">Target signal</span><p class="mono" style="line-height:1.5">433.92 MHz · OOK/ASK · −10 dBm<br>Bit period <span class="gold">2000 µs</span> — 1 = on&nbsp;1500/off&nbsp;500, 0 = on&nbsp;500/off&nbsp;1500 µs<br>OPEN <span class="gold">0xACCE55</span> <span class="muted">(reads "ACCESS")</span></p></div>
+      </div>
+      <div class="note red">The raw on/off pattern is ALL you need to copy — no decoding required. Stuck? Paste your capture into an LLM and ask.</div>
+    </div>
+  </section>
+
+  <!-- 13 LOCATION INTRO -->
+  <section class="slide" data-section="Location Factor // The Idea">
+    <div class="wrap">
+      <div class="eyebrow cyan">Factor 2 · Somewhere You Are</div>
+      <h2>How anything knows<br>where you are</h2>
+      <p class="body" style="margin-bottom:4px">Measure your distance from <span class="cyt">three known points</span> and exactly one spot fits all three. That's <strong>trilateration</strong> — the engine behind GPS, cell towers, Wi-Fi positioning, Bluetooth beacons, and AirTags.</p>
+      <svg class="diagram" viewBox="0 0 680 300" role="img" aria-label="Three circles from three anchors intersecting at one point">
+        <circle cx="120" cy="220" r="200" fill="none" stroke="rgba(84,211,198,.32)" stroke-width="1.4"/>
+        <circle cx="380" cy="70" r="170" fill="none" stroke="rgba(84,211,198,.32)" stroke-width="1.4"/>
+        <circle cx="560" cy="250" r="232" fill="none" stroke="rgba(84,211,198,.32)" stroke-width="1.4"/>
+        <g font-family="var(--mono)" font-size="13">
+          <circle cx="120" cy="220" r="5" fill="#f2b134"/><text x="120" y="242" fill="#f2b134" text-anchor="middle">A1</text>
+          <circle cx="380" cy="70" r="5" fill="#f2b134"/><text x="380" y="58" fill="#f2b134" text-anchor="middle">A2</text>
+          <circle cx="560" cy="250" r="5" fill="#f2b134"/><text x="560" y="272" fill="#f2b134" text-anchor="middle">A3</text>
+          <circle cx="318" cy="206" r="6.5" fill="#ff4d4d"/><text x="318" y="192" fill="#ff4d4d" text-anchor="middle" font-weight="700">YOU</text>
+        </g>
+      </svg>
+      <div class="note">Three signals + three distances = one location. Simple geometry, enormous reach.</div>
+    </div>
+  </section>
+
+  <!-- 14 TRILATERATION MATH -->
+  <section class="slide" data-section="Location Factor // The Math">
+    <svg class="onion" style="top:118px;right:56px" viewBox="0 0 32 40"><use href="#onion"/></svg>
+    <div class="wrap">
+      <div class="eyebrow cyan">The Math, Walked Through</div>
+      <h2>From distances<br>to a dot</h2>
+      <p class="body">Each anchor at <span class="cyt">(xᵢ, yᵢ)</span> measures a distance <span class="cyt">dᵢ</span> to you. "Distance dᵢ from a point" is just a circle:</p>
+      <div class="eq">(x − x<span class="c">ᵢ</span>)² + (y − y<span class="c">ᵢ</span>)² = d<span class="c">ᵢ</span>²<span class="small">one equation per anchor — but the squares make it ugly</span></div>
+      <div class="eqlabel">The trick: subtract one circle from another. The x², y² terms cancel.</div>
+      <div class="eq">2(x₂−x₁)x + 2(y₂−y₁)y = (d₁²−d₂²) + (x₂²−x₁²) + (y₂²−y₁²)<span class="small">…and the same for anchors 1 &amp; 3 → two clean LINEAR equations</span></div>
+      <div class="note cyan">Two linear equations, two unknowns (x, y). Solve → that's your position. Where do the distances come from? Next slide.</div>
+    </div>
+  </section>
+
+  <!-- 15 AUDIO VS RF -->
+  <section class="slide" data-section="Audio vs RF // Same Wave, Different Rules">
+    <div class="wrap">
+      <div class="democue cyan">Live Demo · Beacons</div>
+      <div class="eyebrow cyan">Where Distance Comes From</div>
+      <h2>Audio vs radio</h2>
+      <div class="shared">Both are waves · both carry data · both can be copied · both can find you</div>
+      <div class="cmp">
+        <div class="row head"><div class="att">Difference</div><div class="rf">Radio (RF)</div><div class="au">Sound</div></div>
+        <div class="row"><div class="att">Speed</div><div class="rfcol">~300,000,000 m/s</div><div class="aucol">~343 m/s</div></div>
+        <div class="row"><div class="att">Travels through</div><div class="rfcol">walls, vacuum</div><div class="aucol">air; stopped by walls &amp; bodies</div></div>
+        <div class="row"><div class="att">Frequency</div><div class="rfcol">MHz – GHz</div><div class="aucol">20 Hz – 20 kHz (+ ultrasound)</div></div>
+        <div class="row"><div class="att">To time-locate you</div><div class="rfcol">nanosecond precision (hard)</div><div class="aucol">millisecond precision (easy)</div></div>
+      </div>
+      <div class="note cyan">Sound is a MILLION times slower — so cheap hardware can clock its travel time. That's why we beep: it makes invisible location tracking something you can hear and measure. Listen — each beacon owns its own tone.</div>
+    </div>
+  </section>
+
+  <!-- 16 SIGNALS YOU BROADCAST -->
+  <section class="slide" data-section="Location Factor // You Leak">
+    <div class="wrap">
+      <div class="eyebrow red">The Catch</div>
+      <h2>You're already<br>broadcasting yourself</h2>
+      <p class="body">Your pocket is shouting constantly. Anyone listening can fingerprint and follow you — no app installed, no permission asked.</p>
+      <div class="grid g3">
+        <div class="card danger"><span class="tag">Bluetooth</span><h3>BLE beacons</h3><p>Devices advertise nonstop. AirTags &amp; "Find My" ride exactly this.</p></div>
+        <div class="card danger"><span class="tag">Wi-Fi</span><h3>Probe requests</h3><p>Your phone calls out the <em>names</em> of networks it remembers — home, work, that café.</p></div>
+        <div class="card danger"><span class="tag">Everywhere</span><h3>Your patterns</h3><p>Same signals, same times, same places. Trivial to map a routine.</p></div>
+      </div>
+      <div class="note red">You leak your location for free. The world just has to listen.</div>
+    </div>
+  </section>
+
+  <!-- 17 ULTRASONIC -->
+  <section class="slide" data-section="Location Factor // The Kicker">
+    <svg class="onion" style="bottom:92px;right:64px" viewBox="0 0 32 40"><use href="#onion"/></svg>
+    <div class="wrap">
+      <div class="eyebrow red">The Part That Gets People</div>
+      <h2>Sounds you<br>can't even hear</h2>
+      <p class="body" style="max-width:64ch">Companies have hidden <span class="redt">inaudible ultrasonic tones</span> in TV ads, in stores, in apps. Your phone's mic hears them — linking which screen you watched and which devices sit near each other. Real, and deployed.</p>
+      <ul class="points red"><li>Tracks what you watch and who you're with — silently.</li><li>Your mic catches frequencies your ears never will.</li></ul>
+      <div class="note red">The beacons you just heard? Same mechanism — only loud enough to notice. The only difference between our beep and the tracking around you is that ours you can hear.</div>
+    </div>
+  </section>
+
+  <!-- 18 SECURITY ONION -->
+  <section class="slide" data-section="Synthesis // Defense In Depth">
+    <div class="wrap">
+      <div class="eyebrow gold">Putting It Together</div>
+      <h2>Security has layers.<br>Yes — like an onion.</h2>
+      <div style="display:grid;grid-template-columns:1fr 1.15fr;gap:30px;align-items:center;margin-top:8px">
+        <svg viewBox="0 0 320 320" role="img" aria-label="Onion cross-section with security layers">
+          <g fill="none" stroke-width="2">
+            <path stroke="var(--cyan)" d="M160 60 C95 60 55 130 55 200 C55 280 110 305 160 305 C210 305 265 280 265 200 C265 130 225 60 160 60 Z"/>
+            <path stroke="var(--gold)" d="M160 95 C112 95 82 150 82 205 C82 268 122 288 160 288 C198 288 238 268 238 205 C238 150 208 95 160 95 Z"/>
+            <path stroke="var(--red)" d="M160 130 C128 130 108 172 108 210 C108 255 135 272 160 272 C185 272 212 255 212 210 C212 172 192 130 160 130 Z"/>
+            <path stroke="var(--ink)" d="M160 165 C142 165 132 192 132 214 C132 245 148 257 160 257 C172 257 188 245 188 214 C188 192 178 165 160 165 Z"/>
+          </g>
+          <path fill="none" stroke="var(--cyan)" stroke-width="2" d="M160 60 C155 38 158 26 146 16 M160 60 C165 38 162 26 174 16"/>
+          <circle cx="160" cy="212" r="7" fill="var(--gold)"/>
+        </svg>
+        <div>
+          <div style="display:grid;gap:11px">
+            <div><span class="mono cyt" style="font-size:.85rem;letter-spacing:.06em">OUTER ── WHERE you are</span><div class="muted" style="font-size:.92rem">leaks for free</div></div>
+            <div><span class="mono gold" style="font-size:.85rem;letter-spacing:.06em">NEXT ── what you HAVE</span><div class="muted" style="font-size:.92rem">a fixed code clones in seconds</div></div>
+            <div><span class="mono redt" style="font-size:.85rem;letter-spacing:.06em">INNER ── what you KNOW</span><div class="muted" style="font-size:.92rem">a secret, a rolling code</div></div>
+            <div><span class="mono" style="font-size:.85rem;letter-spacing:.06em;color:#fff">CORE ── the vault</span><div class="muted" style="font-size:.92rem">what it's all protecting</div></div>
+          </div>
+          <p class="body" style="font-size:1.02rem;margin-top:16px">Any one layer is weak. Stack them and the attacker's job grows exponentially. That's <span class="gold">defense in depth</span> — and why banks, phones, and 2FA exist.</p>
+        </div>
+      </div>
+      <div class="note">Peel one layer, there's another. You spent an hour as the attacker — the fastest way to understand the defense.</div>
+    </div>
+  </section>
+
+  <!-- 19 DEBRIEF -->
+  <section class="slide" data-section="Debrief // Takeaways">
+    <div class="wrap">
+      <div class="eyebrow gold">What You Walk Out With</div>
+      <h2>The debrief</h2>
+      <div class="grid g2">
+        <ul class="points" style="margin-top:0"><li>A "key" is just <strong>proof</strong> — sorted into factors.</li><li>Sub-GHz is everywhere; <strong>invisible ≠ secure.</strong></li><li><strong>OOK</strong> = on/off bits; <strong>capture &amp; replay</strong> beats fixed codes.</li><li>Rolling codes are the fix.</li></ul>
+        <ul class="points" style="margin-top:0"><li><strong>Trilateration</strong>: 3 distances → one position.</li><li>Sound is slow → cheap, easy localization.</li><li>Your devices <strong>broadcast you</strong> — BLE, Wi-Fi, ultrasound.</li><li>Layer the factors = <strong>defense in depth.</strong></li></ul>
+      </div>
+    </div>
+  </section>
+
+  <!-- 20 GO FURTHER -->
+  <section class="slide" data-section="Optional // Going Further">
+    <svg class="onion" style="top:122px;left:50px" viewBox="0 0 32 40"><use href="#onion"/></svg>
+    <div class="wrap">
+      <div class="eyebrow cyan">If You Want More This Week</div>
+      <h2>Going further<br><span class="muted" style="font-size:.5em;text-transform:none;font-family:var(--serif)">— totally optional</span></h2>
+      <div class="grid g2">
+        <div class="card"><span class="tag">Harden it</span><h3>Beat your own replay</h3><p>Add a rolling code so your captured signal stops working.</p></div>
+        <div class="card"><span class="tag">Go deeper on RF</span><h3>Decode, don't just copy</h3><p>Read the actual bytes; explore your badge's other radio tricks.</p></div>
+        <div class="card cool"><span class="tag">Build the WHERE factor</span><h3>Acoustic triangulation</h3><p>Code your badge to hear the beacons and place itself on a grid → then Battleship.</p></div>
+        <div class="card"><span class="tag">In the wild</span><h3>Test your own gear</h3><p>Capture your own garage, doorbell, or fob — spot fixed vs rolling in real life.</p></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 21 CLOSING -->
+  <section class="slide" data-section="End Of Briefing" id="tEnd">
+    <div class="wrap">
+      <div class="eyebrow">End Of Briefing</div>
+      <h1 style="font-size:clamp(2.2rem,8vw,5.4rem)">Invisible<br><span style="color:var(--gold)">isn't secure.</span></h1>
+      <div class="tagline" style="max-width:34ch">Now you know how to look — and how to listen. Go open the vault.</div>
+      <div class="subhint">// you peeled the outer layer</div>
+      <div class="meta"><span>OPERATION <b>// GHOST KEY</b></span><span>STATUS <b>// GO LOUD</b></span></div>
+    </div>
+    <div class="bigwave"><svg viewBox="0 0 1200 120" preserveAspectRatio="none"><path d="M0,60 Q60,10 120,60 T240,60 T360,60 T480,60 T600,60 T720,60 T840,60 T960,60 T1080,60 T1200,60"/></svg></div>
+  </section>
+
+  <!-- 22 CHALLENGE REFERENCE (leave this up during the build) -->
+  <section class="slide" data-section="The Challenge // Reference">
+    <div class="wrap">
+      <div class="eyebrow red">Your Build</div>
+      <h2>The challenge</h2>
+      <p class="body" style="max-width:78ch">Your badge has a <strong>CC1101 radio</strong> but no sub-GHz software. Write code that <span class="gold">captures the Vault Key's OPEN signal and replays it</span> to crack the vault open. LLMs welcome.</p>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:28px;margin-top:20px">
+        <div>
+          <div class="eyebrow" style="margin-bottom:12px;font-size:12px">Objectives</div>
+          <div class="obj"><div class="n">1</div><div><div class="t">Recon</div><div class="d">Prove the signal exists.</div></div></div>
+          <div class="obj"><div class="n">2</div><div><div class="t">Capture</div><div class="d">Record the OPEN pattern.</div></div></div>
+          <div class="obj t3"><div class="n">3</div><div><div class="t">Replay</div><div class="d">Transmit it — open the vault.</div></div></div>
+        </div>
+        <div>
+          <div class="eyebrow" style="margin-bottom:12px;font-size:12px">What your code does</div>
+          <ol class="steps" style="margin-top:0">
+            <li>Init the CC1101 (find its pins).</li>
+            <li>Tune: <code>433.92 MHz</code>, <code>OOK</code>.</li>
+            <li>Receive the raw on/off timing.</li>
+            <li>Store it, then transmit it back.</li>
+          </ol>
+          <div class="card danger" style="margin-top:15px"><span class="tag">Target signal</span><p class="mono" style="line-height:1.5">433.92 MHz · OOK/ASK · −10 dBm<br>Bit <span class="gold">2000 µs</span>: 1 = on&nbsp;1500/off&nbsp;500 · 0 = on&nbsp;500/off&nbsp;1500<br>Frame 1111 + 0xCC + <span class="gold">0xACCE55</span> ×8/press<br>SAFE matches on-air <span class="gold">0xCCACCE55</span></p></div>
+        </div>
+      </div>
+      <div class="note red">The raw on/off pattern is ALL you need — no decoding. Tools: OnionDAO Badge, OnionOS, LilyGo T-Embed CC1101. Stuck? Paste your capture into an LLM.</div>
+    </div>
+  </section>
+
+</main>
+
+
+
+<script>
+  const slides=[...document.querySelectorAll('.slide')];
+  const total=slides.length;
+  let i=0;
+  const sectionEl=document.getElementById('section');
+  const counterEl=document.getElementById('counter');
+  const progressEl=document.getElementById('progress');
+  const pad=n=>String(n).padStart(2,'0');
+
+  function render(){
+    slides.forEach((s,k)=>s.classList.toggle('active',k===i));
+    sectionEl.textContent=slides[i].dataset.section||'';
+    counterEl.textContent=pad(i+1)+' / '+pad(total);
+    progressEl.style.width=(i/(total-1)*100)+'%';
+  }
+  function go(n){ i=Math.max(0,Math.min(total-1,n)); render(); }
+  function next(){ go(i+1); } function prev(){ go(i-1); }
+
+  document.addEventListener('keydown',e=>{
+    if(e.key==='ArrowRight'||e.key===' '||e.key==='PageDown'){e.preventDefault();next();}
+    else if(e.key==='ArrowLeft'||e.key==='PageUp'){e.preventDefault();prev();}
+    else if(e.key==='Home'){go(0);} else if(e.key==='End'){go(total-1);}
+    else if(e.key==='o'||e.key==='O'){document.body.classList.toggle('peel');}
+    else if(e.key==='f'||e.key==='F'){if(!document.fullscreenElement)document.documentElement.requestFullscreen&&document.documentElement.requestFullscreen();else document.exitFullscreen&&document.exitFullscreen();}
+  });
+
+  document.getElementById('next').addEventListener('click',next);
+  document.getElementById('prev').addEventListener('click',prev);
+  document.getElementById('deck').addEventListener('click',e=>{
+    if(e.target.closest('a,button,input')) return;
+    const x=e.clientX/window.innerWidth;
+    if(x>0.62) next(); else if(x<0.38) prev();
+  });
+
+  render();
+</script>
+</body>
+</html>
