@@ -361,11 +361,18 @@ if [[ "$SELECTED_CHIP" == "busy" ]]; then
 fi
 
 echo "Opening serial monitor on $PORT at $BAUD baud..."
+if [[ ! -t 0 || ! -r /dev/tty ]]; then
+  echo "Serial monitor requires an interactive terminal." >&2
+  exit 1
+fi
+
 trap handle_interrupt INT
 trap handle_terminate TERM
 trap 'stop_monitor TERM' EXIT
 
-idf.py -p "$PORT" -b "$BAUD" monitor &
+# Bash redirects stdin for background commands in non-job-control scripts.
+# Reattach the monitor to the terminal so idf_monitor sees a TTY.
+idf.py -p "$PORT" -b "$BAUD" monitor </dev/tty >/dev/tty 2>/dev/tty &
 MONITOR_PID=$!
 
 set +e
