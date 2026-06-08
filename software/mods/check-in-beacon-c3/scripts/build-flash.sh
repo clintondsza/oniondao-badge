@@ -26,7 +26,7 @@ usage() {
 Usage: scripts/build-flash.sh [options]
 
 Build and flash the ESP32-C3 check-in beacon firmware.
-This performs an app update only. It does not erase flash.
+This writes the bootloader, partition table, and app. It does not erase flash.
 
 Options:
   -p, --port PORT    Flash a specific serial port instead of auto-detecting
@@ -200,6 +200,16 @@ detect_port() {
   return 1
 }
 
+sdkconfig_matches_c3_mini() {
+  [[ -f sdkconfig ]] &&
+    grep -q '^CONFIG_IDF_TARGET="esp32c3"$' sdkconfig &&
+    grep -q '^CONFIG_ARDUINO_VARIANT="esp32c3"$' sdkconfig &&
+    grep -q '^CONFIG_AUTOSTART_ARDUINO=y$' sdkconfig &&
+    grep -q '^CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y$' sdkconfig &&
+    grep -q '^CONFIG_ESPTOOLPY_FLASHMODE_DIO=y$' sdkconfig &&
+    grep -q '^CONFIG_ESPTOOLPY_FLASHFREQ_40M=y$' sdkconfig
+}
+
 source_esp_idf || true
 require_command idf.py
 ESPTOOL="$(esptool_command)"
@@ -232,7 +242,9 @@ fi
 
 echo "Using ESP32-C3 on $PORT"
 
-if [[ ! -f sdkconfig ]] || ! grep -q '^CONFIG_IDF_TARGET="esp32c3"$' sdkconfig; then
+if ! sdkconfig_matches_c3_mini; then
+  echo "Regenerating sdkconfig with ESP32-C3 Mini boot defaults..."
+  rm -f sdkconfig
   idf.py set-target "$TARGET"
 fi
 

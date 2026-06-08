@@ -2,6 +2,11 @@
 
 Minimal ESP32-C3 mini firmware for Onion OS check-ins.
 
+On startup, the beacon initializes ESP-NOW and sends its first advertise packet
+before attempting Wi-Fi, so the C3 Mini starts acting as a beacon immediately on
+power-up. Wi-Fi is retried in the background and is required only when posting
+approved check-ins to the server.
+
 The beacon repeatedly broadcasts the Onion OS packed ESP-NOW advertise packet.
 Badges decide whether to prompt by comparing the received advertise RSSI with
 `minRssi`. When a user approves on the badge, the badge sends a packed approve
@@ -141,4 +146,11 @@ Use ESP-IDF v5.5.x, matching the other firmware projects in this repo:
 idf.py set-target esp32c3
 idf.py build
 idf.py flash monitor
+```
+
+The included helper auto-detects the first attached ESP32-C3 and flashes a
+bootable C3 Mini image, including bootloader, partition table, and app:
+
+```sh
+scripts/build-flash.sh --monitor
 ```

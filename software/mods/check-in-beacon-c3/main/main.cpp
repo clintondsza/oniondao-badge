@@ -550,9 +550,11 @@ void setup() {
     Serial.printf("[beacon] boot id=%s room=%s label=%s\n", BEACON_ID, BEACON_ROOM, BEACON_LABEL);
 
     initNonce();
-    connectWiFi(10000);
     ensureEspNow();
     advertise();
+
+    s_lastWifiAttempt = millis();
+    connectWiFi(1000);
 }
 
 void loop() {

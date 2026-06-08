@@ -2,12 +2,14 @@
 CONFIG_IDF_TARGET="esp32c3"
 
 # Arduino-as-component: auto-run setup()/loop().
+CONFIG_ARDUINO_VARIANT="esp32c3"
 CONFIG_AUTOSTART_ARDUINO=y
 CONFIG_FREERTOS_HZ=1000
 
 # Conservative defaults for common ESP32-C3 mini dev boards.
 CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
 CONFIG_ESPTOOLPY_FLASHMODE_DIO=y
+CONFIG_ESPTOOLPY_FLASHFREQ_40M=y
 
 # Keep enough app space for Arduino WiFi + HTTPClient.
 CONFIG_PARTITION_TABLE_CUSTOM=y

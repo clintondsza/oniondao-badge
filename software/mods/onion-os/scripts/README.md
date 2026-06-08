@@ -47,6 +47,13 @@ border, and a separator line.
 `espnow-beacon.lua` enables ESP-NOW, broadcasts a short badge identity packet,
 and displays the first received packet if another badge replies.
 
+## Check-In Range
+
+`checkin-range.lua` listens for Onion check-in beacon advertise packets and
+shows whether the current badge RSSI meets the beacon's advertised threshold.
+This is useful for testing a tight beacon threshold, such as `-50 dBm`, before
+using the normal check-in prompt. Press `CANCEL` to exit back to Onion OS.
+
 ## Tamagonion
 
 `tamagonion.lua` is a Tamagotchi-style virtual pet that runs entirely as a Lua
@@ -98,6 +105,10 @@ To install it through a manifest, serve this script and the image assets:
     {
       "name": "espnow-beacon.lua",
       "url": "https://example.com/espnow-beacon.lua"
+    },
+    {
+      "name": "checkin-range.lua",
+      "url": "https://example.com/checkin-range.lua"
     },
     {
       "name": "image-browser.lua",
