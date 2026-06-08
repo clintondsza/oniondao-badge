@@ -603,6 +603,22 @@ Request:
 
 If approved, the server records the badge wallet and migrates existing point balance to tokens.
 
+### Native Room Check-ins
+
+Onion OS listens for ESP-NOW room beacon advertisements while WiFi is connected.
+Packets use a packed binary header with `magic = "ONCHK1"` and `version = 1`.
+
+| Type | Direction | Fields after header |
+|---|---|---|
+| `1` advertise | beacon -> badge | `beaconId[32]`, `room[32]`, `label[48]`, `minRssi`, `nonce[8]`, `sequence` |
+| `2` approve | badge -> beacon | `beaconId[32]`, `nonce[8]`, `hardwareId[65]`, `onionId`, `username[32]`, `wallet[48]`, `rssi`, `approvedAt`, `badgeMac[6]` |
+| `3` result | beacon -> badge | `beaconId[32]`, `nonce[8]`, `awarded`, `points`, `message[80]` |
+
+When an advertisement is close enough, the badge shows a native check-in prompt.
+SELECT sends the approval packet to the beacon; CANCEL dismisses it. The beacon
+relays approved payloads to the server's `POST /api/badge/checkin` endpoint and
+can send a result packet back for display.
+
 ### Badge Transaction Response
 
 ```http

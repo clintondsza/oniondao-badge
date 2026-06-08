@@ -77,9 +77,12 @@ extern "C" {
 #define SERIAL_BAUD 115200
 #define WIFI_CONNECT_TIMEOUT_MS 15000
 #define HANDSHAKE_INTERVAL_MS 30000
+#define PROFILE_REFRESH_INTERVAL_MS 60000
 #define MQTT_RECONNECT_INTERVAL_MS 5000
 #define MQTT_HANDSHAKE_ACCEPT_WINDOW_MS 10000
 #define BOOT_SPLASH_MS 3000
+// Lua allocates from PSRAM where available; scripts can be large enough for
+// pushed apps and streaming voice helpers without relying on fragmented RAM.
 #define MAX_SCRIPT_BYTES (256 * 1024)
 #define MQTT_CLIENT_BUFFER_BYTES (32 * 1024)
 #define MQTT_CLIENT_OUT_BUFFER_BYTES 4096
@@ -100,7 +103,12 @@ extern "C" {
 #define LUA_SLEEP_MAX_MS 60000
 #define LUA_ESPNOW_RECV_MAX_MS 30000
 #define ONION_ESPNOW_MAX_PAYLOAD 240
-#define ONION_ESPNOW_QUEUE_LEN 8
+#define LUA_KV_MAX_VALUE 240          // kv values mirror the ESP-NOW payload cap
+// Static internal RAM (~32 KB); the queue is filled from the WiFi task
+// callback, so it must not live in PSRAM. Sized so a receiver can sit inside
+// a full e-ink refresh (~1.7 s) while a peer streams 240-byte voice frames at
+// ~66 frames/s (~112 frames) without dropping any.
+#define ONION_ESPNOW_QUEUE_LEN 128
 #define LUA_HTTP_MAX_TIMEOUT_MS 30000
 #define LUA_HTTP_DEFAULT_TIMEOUT_MS 10000
 #define LUA_MQTT_RECV_MAX_MS 30000
@@ -108,6 +116,10 @@ extern "C" {
 #define ONION_LUA_MQTT_MAX_PAYLOAD 512
 #define ONION_LUA_MQTT_QUEUE_LEN 8
 #define ONION_LUA_MQTT_MAX_SUBS 8
+#define ONION_CHECKIN_SCAN_INTERVAL_MS 5000
+#define ONION_CHECKIN_PROMPT_COOLDOWN_MS 300000
+#define ONION_CHECKIN_RESULT_MS 15000
+#define ONION_CHECKIN_DEFAULT_MIN_RSSI -62
 // Swappable side-port modules (see docs/MODULES.md). CC1101 and the Sound
 // module share the same physical pins, so only one may be active at a time.
 #define CC1101_XOSC_MHZ 26.0
@@ -119,6 +131,9 @@ extern "C" {
 #define SOUND_TONE_MAX_MS 10000
 #define SOUND_PLAY_MAX_BYTES 65536
 #define SOUND_MIC_MAX_SAMPLES 4096
+#define SOUND_MIC_READ_MAX_TIMEOUT_MS 5000
+#define SOUND_MIC_MAX_DISCARD_MS 1000
+#define SOUND_AMP_UNMUTE_MS 100
 #define ONION_DISPLAY_WIDTH 264
 #define ONION_DISPLAY_HEIGHT 176
 #ifndef PIN_BATTERY_ADC
@@ -156,6 +171,8 @@ enum Screen : uint8_t {
     SCREEN_LINK_PROMPT,
     SCREEN_TX_PROMPT,
     SCREEN_LUA_PROMPT,
+    SCREEN_CHECKIN_PROMPT,
+    SCREEN_CHECKIN_RESULT,
     SCREEN_LOG,
     SCREEN_SETTINGS,
     SCREEN_WIFI_OVERVIEW,
@@ -226,11 +243,32 @@ struct LuaScriptPrompt {
     bool active = false;
 };
 
+struct CheckInPrompt {
+    String beaconId;
+    String room;
+    String label;
+    uint8_t beaconMac[6] = {};
+    uint8_t nonce[8] = {};
+    int8_t rssi = 0;
+    int8_t minRssi = ONION_CHECKIN_DEFAULT_MIN_RSSI;
+    bool active = false;
+};
+
+struct CheckInResult {
+    String beaconId;
+    String message;
+    int points = 0;
+    bool awarded = false;
+    uint32_t shownAt = 0;
+};
+
 static RuntimeConfig g_config;
 static BadgeIdentity g_identity;
 static LinkPrompt g_linkPrompt;
 static TransactionPrompt g_txPrompt;
 static LuaScriptPrompt g_luaPrompt;
+static CheckInPrompt g_checkinPrompt;
+static CheckInResult g_checkinResult;
 static Preferences g_prefs;
 static esp_mqtt_client_handle_t g_mqtt = nullptr;
 static bool g_mqttConnected = false;
@@ -240,8 +278,11 @@ static bool g_needsRedraw = true;
 static uint8_t g_lastButtons = 0;
 static uint32_t g_lastButtonPoll = 0;
 static uint32_t g_lastHandshake = 0;
+static uint32_t g_lastProfileRefresh = 0;
 static uint32_t g_lastMqttAttempt = 0;
 static uint32_t g_lastWifiAttempt = 0;
+static uint32_t g_lastCheckInScan = 0;
+static uint32_t g_lastCheckInPromptAt = 0;
 static uint32_t g_mqttHandshakeSentAt = 0;
 static bool g_mqttHandshakePending = false;
 static String g_log = "Booting";
@@ -335,6 +376,72 @@ static const LuaButton kLuaButtons[] = {
 
 static const uint8_t kEspNowBroadcastMac[6] = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
 
+enum CheckInPacketType : uint8_t {
+    CHECKIN_PACKET_ADVERTISE = 1,
+    CHECKIN_PACKET_APPROVE = 2,
+    CHECKIN_PACKET_RESULT = 3,
+};
+
+static const char kCheckInMagic[6] = {'O', 'N', 'C', 'H', 'K', '1'};
+static const uint8_t kCheckInVersion = 1;
+
+struct __attribute__((packed)) CheckInPacketHeader {
+    char magic[6];
+    uint8_t version;
+    uint8_t type;
+};
+
+struct __attribute__((packed)) CheckInAdvertisePacket {
+    CheckInPacketHeader header;
+    char beaconId[32];
+    char room[32];
+    char label[48];
+    int8_t minRssi;
+    uint8_t nonce[8];
+    uint32_t sequence;
+};
+
+struct __attribute__((packed)) CheckInApprovePacket {
+    CheckInPacketHeader header;
+    char beaconId[32];
+    uint8_t nonce[8];
+    char hardwareId[65];
+    uint64_t onionId;
+    char username[32];
+    char wallet[48];
+    int8_t rssi;
+    uint32_t approvedAt;
+    uint8_t badgeMac[6];
+};
+
+struct __attribute__((packed)) CheckInResultPacket {
+    CheckInPacketHeader header;
+    char beaconId[32];
+    uint8_t nonce[8];
+    uint8_t awarded;
+    uint16_t points;
+    char message[80];
+};
+
+struct CheckInPendingOffer {
+    uint8_t beaconMac[6] = {};
+    char beaconId[33] = {};
+    char room[33] = {};
+    char label[49] = {};
+    uint8_t nonce[8] = {};
+    int8_t rssi = 0;
+    int8_t minRssi = ONION_CHECKIN_DEFAULT_MIN_RSSI;
+    uint32_t seenAt = 0;
+};
+
+struct CheckInPendingResult {
+    char beaconId[33] = {};
+    uint8_t nonce[8] = {};
+    bool awarded = false;
+    uint16_t points = 0;
+    char message[81] = {};
+};
+
 static bool g_espnowStarted = false;
 static uint32_t g_espnowSent = 0;
 static uint32_t g_espnowReceived = 0;
@@ -342,6 +449,14 @@ static portMUX_TYPE g_espnowMux = portMUX_INITIALIZER_UNLOCKED;
 static EspNowQueuedMessage g_espnowQueue[ONION_ESPNOW_QUEUE_LEN];
 static uint8_t g_espnowQueueHead = 0;
 static uint8_t g_espnowQueueCount = 0;
+static portMUX_TYPE g_checkinMux = portMUX_INITIALIZER_UNLOCKED;
+static CheckInPendingOffer g_checkinPendingOffer;
+static CheckInPendingResult g_checkinPendingResult;
+static bool g_checkinOfferPending = false;
+static bool g_checkinResultPending = false;
+static String g_lastCheckInBeaconId;
+
+static bool refreshPublicProfile(bool quiet);
 
 struct MqttQueuedMessage {
     char topic[ONION_LUA_MQTT_MAX_TOPIC + 1] = {};
@@ -883,6 +998,14 @@ static String imagePathForName(const String& name) {
     return "/images_" + name;
 }
 
+// arduino-esp32 cores differ in whether File::name() keeps the leading "/";
+// without it the startsWith("/images_") filter goes quiet and onion.images()
+// silently returns an empty list (the script explorer handles this inline).
+static String normalizedSpiffsPath(const String& path) {
+    if (path.startsWith("/")) return path;
+    return "/" + path;
+}
+
 static void refreshScriptList() {
     g_scripts.clear();
     File root = SPIFFS.open("/");
@@ -990,6 +1113,30 @@ static void drawLuaPrompt() {
     printString("Size: " + String(g_luaPrompt.sizeBytes) + " bytes", 116);
 }
 
+static void drawCheckInPrompt() {
+    g_frame.fillScreen(GxEPD_WHITE);
+    printLine("CHECK IN?", 24, &FreeMonoBold18pt7b);
+    printString(clipped(g_checkinPrompt.label.length() ? g_checkinPrompt.label : "Workshop attendance", 25),
+        54, &FreeMonoBold9pt7b);
+    printString("Room: " + clipped(g_checkinPrompt.room.length() ? g_checkinPrompt.room : g_checkinPrompt.beaconId, 21), 78);
+    printString("Signal: " + String((int)g_checkinPrompt.rssi) + " dBm", 100);
+    printString("SELECT yes", 138, &FreeMonoBold9pt7b);
+    printString("CANCEL no", 158);
+}
+
+static void drawCheckInResult() {
+    g_frame.fillScreen(GxEPD_WHITE);
+    printLine(g_checkinResult.awarded ? "CHECKED IN" : "CHECK IN", 24, &FreeMonoBold18pt7b);
+    if (g_checkinResult.points > 0) {
+        printString("Points: +" + String(g_checkinResult.points), 54, &FreeMonoBold9pt7b);
+        printString(clipped(g_checkinResult.message, 27), 78);
+    } else {
+        printString(clipped(g_checkinResult.message.length() ? g_checkinResult.message : "Waiting for beacon...", 27),
+            58, &FreeMonoBold9pt7b);
+    }
+    printString("SELECT/CANCEL to close", 142);
+}
+
 // Forward declarations for WiFi screens (defined after ensureWifi)
 static void drawSettingsScreen();
 static void drawWifiOverview();
@@ -1057,6 +1204,12 @@ static void flushFrame() {
                 GxEPD_WHITE, GxEPD_BLACK);
         } while (display.nextPage());
         ++g_partialCount;
+        // A partial refresh leaves the panel's DC/DC booster running (a full
+        // one powers it down at the end of its waveform), and a running e-ink
+        // booster puts audible glitches into the Sound module's mic/speaker
+        // path. Power off after every partial; the panel keeps its image and
+        // its differential RAM.
+        display.powerOff();
     }
 
     memcpy(g_prevFrame, cur, FRAME_BYTES);
@@ -1069,6 +1222,8 @@ static void redraw() {
     else if (g_screen == SCREEN_SCRIPT_EXPLORER) drawScriptExplorer();
     else if (g_screen == SCREEN_TX_PROMPT)       drawTransactionPrompt();
     else if (g_screen == SCREEN_LUA_PROMPT)      drawLuaPrompt();
+    else if (g_screen == SCREEN_CHECKIN_PROMPT)  drawCheckInPrompt();
+    else if (g_screen == SCREEN_CHECKIN_RESULT)  drawCheckInResult();
     else if (g_screen == SCREEN_SETTINGS)        drawSettingsScreen();
     else if (g_screen == SCREEN_WIFI_OVERVIEW)   drawWifiOverview();
     else if (g_screen == SCREEN_WIFI_SCANNING)   drawWifiScanning();
@@ -1080,6 +1235,14 @@ static void redraw() {
     else drawStatus();
     flushFrame();
     g_needsRedraw = false;
+}
+
+// Undo walkie-mode 802.11 LR (see onion.wifi_disconnect) before any AP
+// association attempt: an LR radio can never join a normal 802.11 AP, so a
+// stale LR setting would brick WiFi (and MQTT/sync) until reboot.
+static void restoreWifiProtocol() {
+    esp_wifi_set_protocol(WIFI_IF_STA,
+        WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G | WIFI_PROTOCOL_11N);
 }
 
 static bool ensureWifi() {
@@ -1094,6 +1257,9 @@ static bool ensureWifi() {
     }
 
     WiFi.mode(WIFI_STA);
+    // Fail-safe: a Lua script may have switched the PHY to LR and exited
+    // without onion.wifi_reconnect (crash, CANCEL paths).
+    restoreWifiProtocol();
     WiFi.begin(g_config.wifiSsid.c_str(), g_config.wifiPassword.c_str());
     uint32_t start = millis();
     while (WiFi.status() != WL_CONNECTED && millis() - start < WIFI_CONNECT_TIMEOUT_MS) {
@@ -1124,6 +1290,11 @@ static void triggerWifiReconnect() {
     if (!g_config.wifiSsid.length()) return;
 
     WiFi.mode(WIFI_STA);
+    // A Lua script may have left the radio in walkie mode (802.11 LR PHY,
+    // auto-reconnect off — see onion.wifi_disconnect) and exited without
+    // wifi_reconnect; an LR radio can never associate, so restore first.
+    restoreWifiProtocol();
+    WiFi.setAutoReconnect(true);
     WiFi.begin(g_config.wifiSsid.c_str(), g_config.wifiPassword.c_str());
     setLog("WiFi reconnecting...");
 }
@@ -1133,6 +1304,8 @@ static void triggerWifiReconnect() {
 static void wifiScanTask(void*) {
     WiFi.disconnect();
     WiFi.mode(WIFI_STA);
+    // An LR-only PHY (walkie mode) cannot hear B/G probe responses.
+    restoreWifiProtocol();
     int n = WiFi.scanNetworks(false, false);
     g_wifiNetworks.clear();
     if (n >= 0) {
@@ -1157,6 +1330,8 @@ static void wifiConnectTask(void* arg) {
     const WifiConnectArgs* a = reinterpret_cast<const WifiConnectArgs*>(arg);
     WiFi.disconnect();
     WiFi.mode(WIFI_STA);
+    restoreWifiProtocol();
+    WiFi.setAutoReconnect(true);
     WiFi.begin(a->ssid, a->pass);
     uint32_t start = millis();
     while (WiFi.status() != WL_CONNECTED && millis() - start < WIFI_CONNECT_TIMEOUT_MS) {
@@ -1776,7 +1951,7 @@ static void persistBadgeState() {
     g_prefs.putBool("linked", g_identity.linked);
 }
 
-static bool refreshPublicProfile();
+static bool refreshPublicProfile(bool quiet = false);
 
 static bool updateProfileFromObject(cJSON* obj) {
     if (!cJSON_IsObject(obj)) return false;
@@ -1794,18 +1969,36 @@ static bool updateProfileFromObject(cJSON* obj) {
         }
     }
 
-    const char* onionKeys[] = {
-        "onionCount", "onions", "onionPoints", "points", "pointBalance",
-        "currentOnionTokens", "currentOnionPoints", "tokenBalance", "onionTokens", "balance"
-    };
-    for (const char* key : onionKeys) {
-        if (jsonValueString(obj, key, value) && value.length()) {
-            if (g_identity.onionCount != value) {
-                g_identity.onionCount = value;
-                changed = true;
-            }
-            break;
+    // Onion balance. The server sends several balance fields at once — the
+    // resolved display value plus its point/token components. Pick the one the
+    // portal shows, in priority order, instead of a blind first-match: a linked
+    // badge's profile carries BOTH a residual "pointBalance" (e.g. 10) and the
+    // real "currentOnionBalance"/token balance (e.g. 2500), and a naive scan
+    // that hit pointBalance first displayed the wrong number.
+    bool gotBalance = false;
+    if (jsonValueString(obj, "currentOnionBalance", value) && value.length()) {
+        gotBalance = true;  // server's already-resolved display balance
+    } else {
+        String balanceType;
+        if (jsonValueString(obj, "balanceType", balanceType)) {
+            const char* sel = balanceType == "points" ? "currentOnionPoints" : "currentOnionTokens";
+            if (jsonValueString(obj, sel, value) && value.length()) gotBalance = true;
         }
+    }
+    if (!gotBalance) {
+        // Legacy / alternate shapes. Token fields precede point fields, and the
+        // ambiguous pointBalance sub-component is intentionally excluded.
+        const char* onionKeys[] = {
+            "onionCount", "onions", "currentOnionTokens", "tokenBalance",
+            "onionTokens", "currentOnionPoints", "onionPoints", "points", "balance"
+        };
+        for (const char* key : onionKeys) {
+            if (jsonValueString(obj, key, value) && value.length()) { gotBalance = true; break; }
+        }
+    }
+    if (gotBalance && g_identity.onionCount != value) {
+        g_identity.onionCount = value;
+        changed = true;
     }
 
     return changed;
@@ -2538,9 +2731,13 @@ static String urlEncode(const String& value) {
     return out;
 }
 
-static bool refreshPublicProfile() {
+// Fetches the attendee profile (Onion balance, wallet) and updates the badge.
+// quiet=true is for the periodic background refresh: it skips the status-line
+// log on every path and only forces a redraw when the balance actually
+// changed, so an idle badge doesn't flicker its e-paper every interval.
+static bool refreshPublicProfile(bool quiet) {
     if (!g_identity.onionId && !g_identity.username.length()) {
-        setLog("No profile identity");
+        if (!quiet) setLog("No profile identity");
         return false;
     }
 
@@ -2554,15 +2751,16 @@ static bool refreshPublicProfile() {
         code = httpGetString(base + "/api/public/profile/" + urlEncode(g_identity.username), &response);
     }
     if (code < 200 || code >= 300) {
-        setLog("Profile GET failed " + String(code));
+        if (!quiet) setLog("Profile GET failed " + String(code));
         return false;
     }
 
     cJSON* root = cJSON_Parse(response.c_str());
     if (!root) {
-        setLog("Bad profile JSON");
+        if (!quiet) setLog("Bad profile JSON");
         return false;
     }
+    String beforeCount = g_identity.onionCount;
     updateProfileFromJson(root);
     String wallet = jsonString(root, "solanaWalletAddress");
     if (wallet.length() && wallet != g_identity.solanaPublicKey) {
@@ -2570,7 +2768,11 @@ static bool refreshPublicProfile() {
         g_prefs.putString("sol_pub", g_identity.solanaPublicKey);
     }
     cJSON_Delete(root);
-    setLog("Profile refreshed");
+    if (quiet) {
+        if (g_identity.onionCount != beforeCount && !g_luaDisplayActive) g_needsRedraw = true;
+    } else {
+        setLog("Profile refreshed");
+    }
     return true;
 }
 
@@ -2993,6 +3195,75 @@ static bool espnowQueuePop(EspNowQueuedMessage& out) {
     return hasMessage;
 }
 
+static void copyBounded(char* dst, size_t dstLen, const char* src, size_t srcLen) {
+    if (!dst || dstLen == 0) return;
+    size_t n = 0;
+    if (src && srcLen) {
+        while (n + 1 < dstLen && n < srcLen && src[n] != '\0') {
+            dst[n] = src[n];
+            n++;
+        }
+    }
+    dst[n] = '\0';
+}
+
+static void copyStringToField(char* dst, size_t dstLen, const String& value) {
+    if (!dst || dstLen == 0) return;
+    size_t n = value.length();
+    if (n >= dstLen) n = dstLen - 1;
+    memcpy(dst, value.c_str(), n);
+    dst[n] = '\0';
+    if (n + 1 < dstLen) memset(dst + n + 1, 0, dstLen - n - 1);
+}
+
+static bool checkInHeaderMatches(const uint8_t* data, int len, uint8_t type) {
+    if (!data || len < (int)sizeof(CheckInPacketHeader)) return false;
+    const CheckInPacketHeader* header = reinterpret_cast<const CheckInPacketHeader*>(data);
+    return memcmp(header->magic, kCheckInMagic, sizeof(kCheckInMagic)) == 0 &&
+        header->version == kCheckInVersion && header->type == type;
+}
+
+static void checkInMaybeCapturePacket(const esp_now_recv_info_t* info, const uint8_t* data, int len, int8_t rssi) {
+    if (!info || !info->src_addr || !data) return;
+
+    if (len == (int)sizeof(CheckInAdvertisePacket) &&
+        checkInHeaderMatches(data, len, CHECKIN_PACKET_ADVERTISE)) {
+        CheckInAdvertisePacket packet;
+        memcpy(&packet, data, sizeof(packet));
+        int8_t minRssi = packet.minRssi ? packet.minRssi : ONION_CHECKIN_DEFAULT_MIN_RSSI;
+        if (rssi < minRssi) return;
+
+        portENTER_CRITICAL(&g_checkinMux);
+        memcpy(g_checkinPendingOffer.beaconMac, info->src_addr, 6);
+        copyBounded(g_checkinPendingOffer.beaconId, sizeof(g_checkinPendingOffer.beaconId),
+            packet.beaconId, sizeof(packet.beaconId));
+        copyBounded(g_checkinPendingOffer.room, sizeof(g_checkinPendingOffer.room),
+            packet.room, sizeof(packet.room));
+        copyBounded(g_checkinPendingOffer.label, sizeof(g_checkinPendingOffer.label),
+            packet.label, sizeof(packet.label));
+        memcpy(g_checkinPendingOffer.nonce, packet.nonce, sizeof(packet.nonce));
+        g_checkinPendingOffer.rssi = rssi;
+        g_checkinPendingOffer.minRssi = minRssi;
+        g_checkinPendingOffer.seenAt = millis();
+        g_checkinOfferPending = true;
+        portEXIT_CRITICAL(&g_checkinMux);
+    } else if (len == (int)sizeof(CheckInResultPacket) &&
+        checkInHeaderMatches(data, len, CHECKIN_PACKET_RESULT)) {
+        CheckInResultPacket packet;
+        memcpy(&packet, data, sizeof(packet));
+        portENTER_CRITICAL(&g_checkinMux);
+        copyBounded(g_checkinPendingResult.beaconId, sizeof(g_checkinPendingResult.beaconId),
+            packet.beaconId, sizeof(packet.beaconId));
+        memcpy(g_checkinPendingResult.nonce, packet.nonce, sizeof(packet.nonce));
+        g_checkinPendingResult.awarded = packet.awarded != 0;
+        g_checkinPendingResult.points = packet.points;
+        copyBounded(g_checkinPendingResult.message, sizeof(g_checkinPendingResult.message),
+            packet.message, sizeof(packet.message));
+        g_checkinResultPending = true;
+        portEXIT_CRITICAL(&g_checkinMux);
+    }
+}
+
 static void espnowQueuePush(const uint8_t mac[6], const uint8_t* data, int len, int8_t rssi) {
     if (!mac || !data || len <= 0) return;
     if (len > ONION_ESPNOW_MAX_PAYLOAD) len = ONION_ESPNOW_MAX_PAYLOAD;
@@ -3020,6 +3291,7 @@ static void espnowQueuePush(const uint8_t mac[6], const uint8_t* data, int len, 
 static void onEspNowReceive(const esp_now_recv_info_t* info, const uint8_t* data, int len) {
     int8_t rssi = 0;
     if (info && info->rx_ctrl) rssi = info->rx_ctrl->rssi;
+    checkInMaybeCapturePacket(info, data, len, rssi);
     if (info && info->src_addr) espnowQueuePush(info->src_addr, data, len, rssi);
 }
 
@@ -3076,10 +3348,147 @@ static bool ensureEspNow(int requestedChannel, String& error) {
         }
         esp_now_register_recv_cb(onEspNowReceive);
         esp_now_register_send_cb(onEspNowSend);
+        // Fixed PMK so per-peer LMKs (onion.espnow_set_peer_key) interoperate
+        // across badges. The PMK only wraps LMKs; broadcast stays plaintext.
+        static const uint8_t kEspNowPmk[ESP_NOW_KEY_LEN] = {
+            'o', 'n', 'i', 'o', 'n', '-', 'o', 's', '-', 'p', 'm', 'k', '-', '0', '0', '1'
+        };
+        esp_err_t pmkRc = esp_now_set_pmk(kEspNowPmk);
+        if (pmkRc != ESP_OK) {
+            Serial.printf("[onion-os] ESP-NOW set_pmk failed %d\n", (int)pmkRc);
+        }
         g_espnowStarted = true;
+        // Internal-heap visibility: the 128-deep RX queue costs ~32 KB of
+        // static internal RAM; watch this line if the queue grows again.
+        Serial.printf("[onion-os] ESP-NOW started queue=%d free_internal=%u\n",
+                      ONION_ESPNOW_QUEUE_LEN,
+                      (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
     }
 
     return espnowAddPeer(kEspNowBroadcastMac, 0, error);
+}
+
+static bool screenAllowsCheckInPrompt() {
+    return g_screen == SCREEN_STATUS && !g_luaDisplayActive &&
+        !g_linkPrompt.active && !g_txPrompt.active && !g_luaPrompt.active;
+}
+
+static void showCheckInResult(const String& message, bool awarded = false, int points = 0) {
+    g_checkinResult.message = message;
+    g_checkinResult.awarded = awarded;
+    g_checkinResult.points = points;
+    g_checkinResult.shownAt = millis();
+    g_screen = SCREEN_CHECKIN_RESULT;
+    g_forceFullRefresh = true;
+    g_needsRedraw = true;
+}
+
+static void sendCheckInApproval(bool approve) {
+    g_checkinPrompt.active = false;
+    g_lastCheckInBeaconId = g_checkinPrompt.beaconId;
+    g_lastCheckInPromptAt = millis();
+
+    if (!approve) {
+        setLog("Check-in skipped");
+        g_screen = SCREEN_STATUS;
+        return;
+    }
+
+    CheckInApprovePacket packet = {};
+    memcpy(packet.header.magic, kCheckInMagic, sizeof(kCheckInMagic));
+    packet.header.version = kCheckInVersion;
+    packet.header.type = CHECKIN_PACKET_APPROVE;
+    copyStringToField(packet.beaconId, sizeof(packet.beaconId), g_checkinPrompt.beaconId);
+    memcpy(packet.nonce, g_checkinPrompt.nonce, sizeof(packet.nonce));
+    copyStringToField(packet.hardwareId, sizeof(packet.hardwareId), g_identity.hardwareId);
+    packet.onionId = g_identity.onionId;
+    copyStringToField(packet.username, sizeof(packet.username), g_identity.username);
+    copyStringToField(packet.wallet, sizeof(packet.wallet), g_identity.solanaPublicKey);
+    packet.rssi = g_checkinPrompt.rssi;
+    packet.approvedAt = millis();
+    esp_wifi_get_mac(WIFI_IF_STA, packet.badgeMac);
+
+    String error;
+    if (!ensureEspNow(0, error) || !espnowAddPeer(g_checkinPrompt.beaconMac, 0, error)) {
+        showCheckInResult("Radio failed: " + clipped(error, 15));
+        return;
+    }
+
+    esp_err_t rc = esp_now_send(g_checkinPrompt.beaconMac,
+        reinterpret_cast<const uint8_t*>(&packet), sizeof(packet));
+    if (rc != ESP_OK) {
+        showCheckInResult("Send failed " + String((int)rc));
+        return;
+    }
+
+    setLog("Check-in sent");
+    showCheckInResult("Waiting for server...");
+}
+
+static void processCheckInService() {
+    uint32_t now = millis();
+    if (WiFi.status() == WL_CONNECTED &&
+        g_wifiWorkerResult.load() != WIFI_WORKER_RUNNING &&
+        now - g_lastCheckInScan >= ONION_CHECKIN_SCAN_INTERVAL_MS) {
+        g_lastCheckInScan = now;
+        String error;
+        if (!ensureEspNow(0, error)) {
+            Serial.printf("[onion-os] check-in ESP-NOW unavailable: %s\n", error.c_str());
+        }
+    }
+
+    CheckInPendingResult pendingResult;
+    bool hasResult = false;
+    portENTER_CRITICAL(&g_checkinMux);
+    if (g_checkinResultPending) {
+        pendingResult = g_checkinPendingResult;
+        g_checkinResultPending = false;
+        hasResult = true;
+    }
+    portEXIT_CRITICAL(&g_checkinMux);
+    if (hasResult) {
+        String msg = String(pendingResult.message);
+        if (!msg.length()) msg = pendingResult.awarded ? "Attendance recorded" : "No active workshop";
+        showCheckInResult(msg, pendingResult.awarded, pendingResult.points);
+        if (pendingResult.awarded) refreshPublicProfile(true);
+    }
+
+    if (g_screen == SCREEN_CHECKIN_RESULT &&
+        g_checkinResult.shownAt &&
+        now - g_checkinResult.shownAt > ONION_CHECKIN_RESULT_MS) {
+        g_screen = SCREEN_STATUS;
+        g_needsRedraw = true;
+    }
+
+    CheckInPendingOffer offer;
+    bool hasOffer = false;
+    portENTER_CRITICAL(&g_checkinMux);
+    if (g_checkinOfferPending) {
+        offer = g_checkinPendingOffer;
+        g_checkinOfferPending = false;
+        hasOffer = true;
+    }
+    portEXIT_CRITICAL(&g_checkinMux);
+    if (!hasOffer || !screenAllowsCheckInPrompt()) return;
+
+    String beaconId = String(offer.beaconId);
+    if (!beaconId.length()) beaconId = macToString(offer.beaconMac);
+    if (beaconId == g_lastCheckInBeaconId &&
+        now - g_lastCheckInPromptAt < ONION_CHECKIN_PROMPT_COOLDOWN_MS) {
+        return;
+    }
+
+    g_checkinPrompt.beaconId = beaconId;
+    g_checkinPrompt.room = String(offer.room);
+    g_checkinPrompt.label = String(offer.label);
+    memcpy(g_checkinPrompt.beaconMac, offer.beaconMac, sizeof(g_checkinPrompt.beaconMac));
+    memcpy(g_checkinPrompt.nonce, offer.nonce, sizeof(g_checkinPrompt.nonce));
+    g_checkinPrompt.rssi = offer.rssi;
+    g_checkinPrompt.minRssi = offer.minRssi;
+    g_checkinPrompt.active = true;
+    g_screen = SCREEN_CHECKIN_PROMPT;
+    g_forceFullRefresh = true;
+    setLog("Check-in beacon nearby");
 }
 
 static bool luaCanReadGpio(int pin) {
@@ -3429,9 +3838,31 @@ static i2s_chan_handle_t g_i2sTx = nullptr;
 static i2s_chan_handle_t g_i2sRx = nullptr;
 static int g_soundSampleRate = SOUND_SPK_SAMPLE_RATE;
 static int g_soundCtrlPin = -1;
+// Mic capture counters (reset on sound_mic_begin) so a script pacing a
+// real-time capture loop can see elapsed time and dropped-read health.
+static uint32_t g_soundMicStartedAt = 0;
+static uint32_t g_soundMicSamples = 0;
+static uint32_t g_soundMicBytes = 0;
+static uint32_t g_soundMicTimeouts = 0;
+
+// Writes `frames` frames of speaker silence. Used to prime the TX DMA before
+// real samples (otherwise the first chunk's head is clipped) and to drain the
+// pipeline before mute (otherwise the tail is).
+static void soundWriteSilence(int frames) {
+    if (!g_i2sTx) return;
+    static const int16_t kZeros[256] = {};
+    while (frames > 0) {
+        int n = frames > 256 ? 256 : frames;
+        size_t written = 0;
+        if (i2s_channel_write(g_i2sTx, kZeros, n * sizeof(int16_t), &written, 500) != ESP_OK) return;
+        if (written == 0) return;
+        frames -= n;
+    }
+}
 
 static void soundStop() {
     if (g_i2sTx) {
+        soundWriteSilence(g_soundSampleRate / 8); // ~125 ms drain so the tail plays out
         i2s_channel_disable(g_i2sTx);
         i2s_del_channel(g_i2sTx);
         g_i2sTx = nullptr;
@@ -3462,6 +3893,7 @@ static bool soundSpeakerBegin(int bclk, int ws, int dout, int ctrl, int sampleRa
     if (ctrl >= 0) {
         pinMode(ctrl, OUTPUT);
         digitalWrite(ctrl, HIGH); // NS4168 CTRL high = amp enabled
+        delay(SOUND_AMP_UNMUTE_MS); // amp soft-start; samples written sooner get clipped
     }
 
     i2s_chan_config_t chanCfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
@@ -3492,6 +3924,7 @@ static bool soundSpeakerBegin(int bclk, int ws, int dout, int ctrl, int sampleRa
     i2s_channel_enable(g_i2sTx);
     g_soundSampleRate = sampleRate;
     g_activeModule = MODULE_SOUND_SPK;
+    soundWriteSilence(sampleRate / 32); // ~31 ms DMA priming
     return true;
 }
 
@@ -3518,14 +3951,41 @@ static void soundPlayTone(double freq, int durationMs, double volume) {
     }
 }
 
-static bool soundMicBegin(int clk, int din, int sampleRate, int powerPin, String& error) {
+// dmaDesc/dmaFrame of 0 keep the I2S driver defaults (~90 ms of buffering).
+// Streaming scripts that process audio between reads (DSP/codec) should pass
+// larger values — e.g. 16 descriptors x 512 frames buffers ~512 ms at 16 kHz,
+// enough to ride out an e-ink refresh without the PDM ring overflowing.
+// discardMs drops the mic's start-up transient (DC-settle pop) before any
+// samples reach the script.
+static bool soundMicBegin(int clk, int din, int ws, int ctrl, int sampleRate,
+                          int dmaDesc, int dmaFrame, int discardMs,
+                          int powerPin, String& error) {
     if (g_activeModule != MODULE_NONE) {
         error = "module busy; end it first";
         return false;
     }
     modulePowerOn(powerPin);
+    // Mic mode select: mute the NS4168 (CTRL low) and hold the shared WS line
+    // low so the SPH0641 drives the left PDM phase before the clock starts.
+    if (ctrl >= 0) {
+        pinMode(ctrl, OUTPUT);
+        digitalWrite(ctrl, LOW);
+    }
+    if (ws >= 0) {
+        pinMode(ws, OUTPUT);
+        digitalWrite(ws, LOW);
+    }
+    delay(10);
 
     i2s_chan_config_t chanCfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
+    if (dmaDesc > 0) {
+        if (dmaDesc > 64) dmaDesc = 64;
+        chanCfg.dma_desc_num = dmaDesc;
+    }
+    if (dmaFrame > 0) {
+        if (dmaFrame > 2046) dmaFrame = 2046; // 16-bit mono: 4092-byte DMA buffer cap
+        chanCfg.dma_frame_num = dmaFrame;
+    }
     if (i2s_new_channel(&chanCfg, nullptr, &g_i2sRx) != ESP_OK) {
         error = "i2s alloc failed";
         modulePowerOff();
@@ -3540,6 +4000,10 @@ static bool soundMicBegin(int clk, int din, int sampleRate, int powerPin, String
             .invert_flags = {0},
         },
     };
+    // 16x PDM downsampling keeps the SPH0641's clock comfortably inside its
+    // normal-mode range at 16 kHz and measurably improves SNR over the default.
+    pdmCfg.clk_cfg.dn_sample_mode = I2S_PDM_DSR_16S;
+    pdmCfg.slot_cfg.slot_mask = I2S_PDM_SLOT_LEFT;
     if (i2s_channel_init_pdm_rx_mode(g_i2sRx, &pdmCfg) != ESP_OK) {
         error = "i2s pdm init failed";
         i2s_del_channel(g_i2sRx);
@@ -3548,7 +4012,26 @@ static bool soundMicBegin(int clk, int din, int sampleRate, int powerPin, String
         return false;
     }
     i2s_channel_enable(g_i2sRx);
+
+    if (discardMs > SOUND_MIC_MAX_DISCARD_MS) discardMs = SOUND_MIC_MAX_DISCARD_MS;
+    if (discardMs > 0) {
+        int remaining = sampleRate * discardMs / 1000;
+        int16_t scratch[256];
+        uint32_t deadline = millis() + discardMs + 80;
+        while (remaining > 0 && (int32_t)(deadline - millis()) > 0) {
+            size_t toRead = remaining >= 256 ? sizeof(scratch) : remaining * sizeof(scratch[0]);
+            size_t bytesRead = 0;
+            esp_err_t rc = i2s_channel_read(g_i2sRx, scratch, toRead, &bytesRead, 120);
+            if (rc != ESP_OK && rc != ESP_ERR_TIMEOUT) break;
+            remaining -= (int)(bytesRead / sizeof(scratch[0]));
+        }
+    }
+
     g_soundSampleRate = sampleRate;
+    g_soundMicStartedAt = millis();
+    g_soundMicSamples = 0;
+    g_soundMicBytes = 0;
+    g_soundMicTimeouts = 0;
     g_activeModule = MODULE_SOUND_MIC;
     return true;
 }
@@ -3748,11 +4231,17 @@ static int luaOnionSoundMicBegin(lua_State* L) {
     const ModuleVariantPins& v = resolveModuleVariant();
     int clk = luaModulePin(L, opt, "clk", v.line[1]);
     int din = luaModulePin(L, opt, "din", v.line[0]);
+    int ws = luaModulePin(L, opt, "ws", v.line[2]);
+    int ctrl = luaModulePin(L, opt, "ctrl", v.line[4]);
     int powerPin = luaModulePin(L, opt, "power_pin", PIN_PWR);
     int sampleRate = (int)luaModulePin(L, opt, "sample_rate", SOUND_MIC_SAMPLE_RATE);
+    int dmaDesc = luaTableInt(L, opt, "dma_desc", 0);
+    int dmaFrame = luaTableInt(L, opt, "dma_frame", 0);
+    int discardMs = luaTableInt(L, opt, "discard_ms", 0);
 
     String error;
-    if (!soundMicBegin(clk, din, sampleRate, powerPin, error)) {
+    if (!soundMicBegin(clk, din, ws, ctrl, sampleRate, dmaDesc, dmaFrame,
+                       discardMs, powerPin, error)) {
         lua_pushnil(L);
         lua_pushstring(L, error.c_str());
         return 2;
@@ -3770,15 +4259,42 @@ static int luaOnionSoundMicRead(lua_State* L) {
     int numSamples = (int)luaL_optinteger(L, 1, 256);
     if (numSamples < 1) numSamples = 1;
     if (numSamples > SOUND_MIC_MAX_SAMPLES) numSamples = SOUND_MIC_MAX_SAMPLES;
+    int timeoutMs = (int)luaL_optinteger(L, 2, 1000);
+    if (timeoutMs < 0) timeoutMs = 0;
+    if (timeoutMs > SOUND_MIC_READ_MAX_TIMEOUT_MS) timeoutMs = SOUND_MIC_READ_MAX_TIMEOUT_MS;
     static int16_t buf[SOUND_MIC_MAX_SAMPLES];
     size_t bytesRead = 0;
-    if (i2s_channel_read(g_i2sRx, buf, numSamples * sizeof(int16_t), &bytesRead, 1000) != ESP_OK) {
+    esp_err_t rc = i2s_channel_read(g_i2sRx, buf, numSamples * sizeof(int16_t),
+                                    &bytesRead, timeoutMs);
+    bool timedOut = rc == ESP_ERR_TIMEOUT; // a timeout still returns what arrived
+    if (timedOut) g_soundMicTimeouts++;
+    if (rc != ESP_OK && !timedOut) {
         lua_pushnil(L);
         lua_pushstring(L, "mic read failed");
         return 2;
     }
+    g_soundMicSamples += bytesRead / sizeof(int16_t);
+    g_soundMicBytes += bytesRead;
+
     lua_pushlstring(L, (const char*)buf, bytesRead);
-    return 1;
+    lua_newtable(L);
+    lua_pushinteger(L, (lua_Integer)(bytesRead / sizeof(int16_t)));
+    lua_setfield(L, -2, "samples");
+    lua_pushinteger(L, (lua_Integer)bytesRead);
+    lua_setfield(L, -2, "bytes");
+    lua_pushinteger(L, g_soundSampleRate);
+    lua_setfield(L, -2, "sample_rate");
+    lua_pushboolean(L, timedOut);
+    lua_setfield(L, -2, "timeout");
+    lua_pushinteger(L, g_soundMicSamples);
+    lua_setfield(L, -2, "total_samples");
+    lua_pushinteger(L, g_soundMicBytes);
+    lua_setfield(L, -2, "total_bytes");
+    lua_pushinteger(L, g_soundMicTimeouts);
+    lua_setfield(L, -2, "timeouts");
+    lua_pushinteger(L, (lua_Integer)(millis() - g_soundMicStartedAt));
+    lua_setfield(L, -2, "elapsed_ms");
+    return 2;
 }
 
 static int luaOnionSoundMicLevel(lua_State* L) {
@@ -3822,9 +4338,33 @@ static int luaOnionSoundMicLevel(lua_State* L) {
 }
 
 static int luaOnionSoundMicEnd(lua_State* L) {
-    if (g_activeModule == MODULE_SOUND_MIC) soundStop();
+    if (g_activeModule != MODULE_SOUND_MIC) {
+        lua_pushboolean(L, true);
+        return 1;
+    }
+    uint32_t durationMs = millis() - g_soundMicStartedAt;
+    uint32_t samples = g_soundMicSamples;
+    uint32_t bytes = g_soundMicBytes;
+    uint32_t timeouts = g_soundMicTimeouts;
+    int sampleRate = g_soundSampleRate;
+    soundStop();
+    Serial.printf("[onion-os] sound mic stop samples=%u bytes=%u duration_ms=%u timeouts=%u\n",
+                  (unsigned)samples, (unsigned)bytes, (unsigned)durationMs,
+                  (unsigned)timeouts);
+
     lua_pushboolean(L, true);
-    return 1;
+    lua_newtable(L);
+    lua_pushinteger(L, samples);
+    lua_setfield(L, -2, "samples");
+    lua_pushinteger(L, bytes);
+    lua_setfield(L, -2, "bytes");
+    lua_pushinteger(L, durationMs);
+    lua_setfield(L, -2, "duration_ms");
+    lua_pushinteger(L, timeouts);
+    lua_setfield(L, -2, "timeouts");
+    lua_pushinteger(L, sampleRate);
+    lua_setfield(L, -2, "sample_rate");
+    return 2;
 }
 
 static int luaOnionLog(lua_State* L) {
@@ -3845,6 +4385,11 @@ static int luaOnionOnionId(lua_State* L) {
 
 static int luaOnionWallet(lua_State* L) {
     lua_pushstring(L, g_identity.solanaPublicKey.c_str());
+    return 1;
+}
+
+static int luaOnionUsername(lua_State* L) {
+    lua_pushstring(L, g_identity.username.c_str());
     return 1;
 }
 
@@ -4117,6 +4662,8 @@ static int luaOnionDisplaySize(lua_State* L) {
 
 static int luaOnionClearDisplay(lua_State*) {
     g_luaCanvas.fillScreen(0);
+    // Scripts use clear_display as the explicit ghost-clear, so always full.
+    g_forceFullRefresh = true;
     luaFlushOrDefer();
     return 0;
 }
@@ -4324,68 +4871,6 @@ static int luaOnionDisplayPixel(lua_State* L) {
     return 0;
 }
 
-// ── Persistent key-value storage (NVS namespace "luakv") ─────────────────────
-
-static int luaOnionKvSet(lua_State* L) {
-    const char* k = luaL_checkstring(L, 1);
-    if (strlen(k) > 15) {
-        lua_pushnil(L);
-        lua_pushstring(L, "key too long");
-        return 2;
-    }
-    size_t n;
-    const char* v = luaL_checklstring(L, 2, &n);
-    if (n > 1024) {
-        lua_pushnil(L);
-        lua_pushstring(L, "value too long");
-        return 2;
-    }
-    Preferences p;
-    p.begin("luakv", false);
-    p.putString(k, String(v, n));
-    p.end();
-    lua_pushboolean(L, 1);
-    return 1;
-}
-
-static int luaOnionKvGet(lua_State* L) {
-    const char* k = luaL_checkstring(L, 1);
-    if (strlen(k) > 15) {
-        if (lua_gettop(L) >= 2) lua_pushvalue(L, 2);
-        else lua_pushnil(L);
-        return 1;
-    }
-    Preferences p;
-    // read-only open fails silently when namespace doesn't exist yet (first run)
-    if (!p.begin("luakv", true)) {
-        p.end();
-        if (lua_gettop(L) >= 2) lua_pushvalue(L, 2);
-        else lua_pushnil(L);
-        return 1;
-    }
-    if (!p.isKey(k)) {
-        p.end();
-        if (lua_gettop(L) >= 2) lua_pushvalue(L, 2);
-        else lua_pushnil(L);
-        return 1;
-    }
-    String val = p.getString(k, "");
-    p.end();
-    lua_pushlstring(L, val.c_str(), val.length());
-    return 1;
-}
-
-static int luaOnionKvDelete(lua_State* L) {
-    const char* k = luaL_checkstring(L, 1);
-    if (strlen(k) > 15) { lua_pushboolean(L, 0); return 1; }
-    Preferences p;
-    p.begin("luakv", false);
-    p.remove(k);
-    p.end();
-    lua_pushboolean(L, 1);
-    return 1;
-}
-
 static int luaOnionKvList(lua_State* L) {
     lua_newtable(L);
     return 1;
@@ -4441,7 +4926,7 @@ static int luaOnionImages(lua_State* L) {
     int index = 1;
     File file = root.openNextFile();
     while (file) {
-        String name = file.name();
+        String name = normalizedSpiffsPath(file.name());
         if (!file.isDirectory() && name.startsWith("/images_")) {
             name.remove(0, 8);
             if (validImageFileName(name)) {
@@ -4672,6 +5157,200 @@ static int luaOnionEspNowReceive(lua_State* L) {
     return 1;
 }
 
+// onion.espnow_set_peer_key(mac, key16) enables radio AES-128 (LMK) for one
+// unicast peer; key=nil reverts the peer to plaintext. Both sides must set the
+// same key or unicast frames are silently dropped by the radio, so scripts
+// should confirm the encrypted path still answers and fall back if it goes
+// quiet.
+static int luaOnionEspNowSetPeerKey(lua_State* L) {
+    uint8_t mac[6];
+    if (!parseMacString(luaL_checkstring(L, 1), mac)) {
+        lua_pushboolean(L, false);
+        lua_pushstring(L, "Bad ESP-NOW MAC");
+        return 2;
+    }
+    if (memcmp(mac, kEspNowBroadcastMac, sizeof(mac)) == 0) {
+        lua_pushboolean(L, false);
+        lua_pushstring(L, "Broadcast peer cannot be encrypted");
+        return 2;
+    }
+    bool clear = lua_isnoneornil(L, 2);
+    const char* key = nullptr;
+    if (!clear) {
+        size_t keyLen = 0;
+        key = luaL_checklstring(L, 2, &keyLen);
+        if (keyLen != ESP_NOW_KEY_LEN) {
+            lua_pushboolean(L, false);
+            lua_pushfstring(L, "ESP-NOW key must be %d bytes", ESP_NOW_KEY_LEN);
+            return 2;
+        }
+    }
+
+    String error;
+    if (!ensureEspNow(0, error) || !espnowAddPeer(mac, 0, error)) {
+        lua_pushboolean(L, false);
+        lua_pushstring(L, error.c_str());
+        return 2;
+    }
+
+    esp_now_peer_info_t peer = {};
+    esp_err_t rc = esp_now_get_peer(mac, &peer);
+    if (rc != ESP_OK) {
+        lua_pushboolean(L, false);
+        lua_pushfstring(L, "ESP-NOW get peer failed %d", (int)rc);
+        return 2;
+    }
+    if (clear) {
+        peer.encrypt = false;
+        memset(peer.lmk, 0, sizeof(peer.lmk));
+    } else {
+        memcpy(peer.lmk, key, ESP_NOW_KEY_LEN);
+        peer.encrypt = true;
+    }
+    rc = esp_now_mod_peer(&peer);
+    if (rc != ESP_OK) {
+        lua_pushboolean(L, false);
+        lua_pushfstring(L, "ESP-NOW mod peer failed %d", (int)rc);
+        return 2;
+    }
+    Serial.printf("[onion-os] ESP-NOW peer %s encrypt=%d\n",
+                  macToString(peer.peer_addr).c_str(), peer.encrypt ? 1 : 0);
+    lua_pushboolean(L, true);
+    return 1;
+}
+
+// --- Lua KV store / crypto --------------------------------------------------
+// Small script-facing primitives so downloadable Lua apps can keep state and
+// do authenticated pairing without custom firmware: NVS key/value blobs in a
+// namespace separate from the protected onion-os config, and SHA-256
+// (libsodium, already linked for the wallet).
+
+static Preferences g_luaPrefs;
+static bool g_luaPrefsOpen = false;
+
+static bool ensureLuaPrefs() {
+    if (!g_luaPrefsOpen) g_luaPrefsOpen = g_luaPrefs.begin("lua-kv", false);
+    return g_luaPrefsOpen;
+}
+
+// NVS limits keys to 15 chars; values are stored as binary-safe blobs.
+static bool luaKvCheckKey(lua_State* L, const char** outKey) {
+    size_t klen = 0;
+    const char* key = luaL_checklstring(L, 1, &klen);
+    if (klen == 0 || klen > 15) {
+        lua_pushnil(L);
+        lua_pushstring(L, "kv key must be 1-15 chars");
+        return false;
+    }
+    *outKey = key;
+    return true;
+}
+
+static int luaOnionKvSet(lua_State* L) {
+    const char* key = nullptr;
+    if (!luaKvCheckKey(L, &key)) return 2;
+    if (!ensureLuaPrefs()) {
+        lua_pushnil(L);
+        lua_pushstring(L, "kv storage unavailable");
+        return 2;
+    }
+    if (lua_isnoneornil(L, 2)) {
+        g_luaPrefs.remove(key);
+        lua_pushboolean(L, true);
+        return 1;
+    }
+    size_t vlen = 0;
+    const char* value = luaL_checklstring(L, 2, &vlen);
+    if (vlen == 0 || vlen > LUA_KV_MAX_VALUE) {
+        lua_pushnil(L);
+        lua_pushfstring(L, "kv value must be 1-%d bytes", (int)LUA_KV_MAX_VALUE);
+        return 2;
+    }
+    if (g_luaPrefs.putBytes(key, value, vlen) != vlen) {
+        lua_pushnil(L);
+        lua_pushstring(L, "kv write failed");
+        return 2;
+    }
+    lua_pushboolean(L, true);
+    return 1;
+}
+
+static int luaOnionKvGet(lua_State* L) {
+    const char* key = nullptr;
+    if (!luaKvCheckKey(L, &key)) return 2;
+    if (!ensureLuaPrefs() || !g_luaPrefs.isKey(key)) {
+        lua_pushnil(L);
+        return 1;
+    }
+    size_t len = g_luaPrefs.getBytesLength(key);
+    if (len == 0 || len > LUA_KV_MAX_VALUE) {
+        lua_pushnil(L);
+        return 1;
+    }
+    char buf[LUA_KV_MAX_VALUE];
+    g_luaPrefs.getBytes(key, buf, len);
+    lua_pushlstring(L, buf, len);
+    return 1;
+}
+
+static int luaOnionKvDel(lua_State* L) {
+    const char* key = nullptr;
+    if (!luaKvCheckKey(L, &key)) return 2;
+    if (!ensureLuaPrefs()) {
+        lua_pushnil(L);
+        lua_pushstring(L, "kv storage unavailable");
+        return 2;
+    }
+    g_luaPrefs.remove(key);
+    lua_pushboolean(L, true);
+    return 1;
+}
+
+// onion.sha256(data) -> 32 raw bytes. Binary-safe input.
+static int luaOnionSha256(lua_State* L) {
+    size_t len = 0;
+    const char* data = luaL_checklstring(L, 1, &len);
+    unsigned char hash[crypto_hash_sha256_BYTES];
+    crypto_hash_sha256(hash, reinterpret_cast<const unsigned char*>(data), len);
+    lua_pushlstring(L, reinterpret_cast<const char*>(hash), sizeof(hash));
+    return 1;
+}
+
+// --- Lua WiFi association control (fixed-channel ESP-NOW) -------------------
+// ESP-NOW shares the one radio with the WiFi STA. While associated to an AP
+// the radio is pinned to that AP's channel, so badges that roamed to different
+// APs (e.g. a multi-AP venue) land on different channels and cannot hear each
+// other. onion.wifi_disconnect() frees the radio from the AP WITHOUT turning
+// it off; the script can then onion.espnow_start(channel) to pin every badge
+// to one agreed channel. Only the AP association (internet/MQTT) is dropped.
+// onion.wifi_reconnect() restores normal connectivity (ensureWifi also undoes
+// the LR PHY automatically once the script exits and the main loop resumes).
+
+static int luaOnionWifiDisconnect(lua_State* L) {
+    WiFi.setAutoReconnect(false); // stop the Arduino layer racing us back on
+    esp_wifi_disconnect();        // leave the AP; radio stays up in STA mode
+    // 802.11 LR (Espressif long-range PHY, ~250 kbps) gives ~10 dB better RX
+    // sensitivity, roughly 2-4x ESP-NOW range badge-to-badge. It is only legal
+    // while not associated (LR cannot talk to a normal AP); every reconnect
+    // path restores B/G/N first via restoreWifiProtocol().
+    esp_err_t lrRc = esp_wifi_set_protocol(WIFI_IF_STA, WIFI_PROTOCOL_LR);
+    if (lrRc != ESP_OK) {
+        Serial.printf("[onion-os] LR protocol set failed %d; default PHY\n", (int)lrRc);
+    }
+    lua_pushboolean(L, true);
+    return 1;
+}
+
+static int luaOnionWifiReconnect(lua_State* L) {
+    restoreWifiProtocol();
+    WiFi.setAutoReconnect(true);
+    if (g_config.wifiSsid.length()) {
+        WiFi.begin(g_config.wifiSsid.c_str(), g_config.wifiPassword.c_str());
+    }
+    lua_pushboolean(L, true);
+    return 1;
+}
+
 static void registerOnionLua(lua_State* L) {
     lua_newtable(L);
     lua_pushcfunction(L, luaOnionLog);
@@ -4682,8 +5361,18 @@ static void registerOnionLua(lua_State* L) {
     lua_setfield(L, -2, "onion_id");
     lua_pushcfunction(L, luaOnionWallet);
     lua_setfield(L, -2, "wallet");
+    lua_pushcfunction(L, luaOnionUsername);
+    lua_setfield(L, -2, "username");
     lua_pushcfunction(L, luaOnionSecureRandom);
     lua_setfield(L, -2, "secure_random");
+    lua_pushcfunction(L, luaOnionSha256);
+    lua_setfield(L, -2, "sha256");
+    lua_pushcfunction(L, luaOnionKvSet);
+    lua_setfield(L, -2, "kv_set");
+    lua_pushcfunction(L, luaOnionKvGet);
+    lua_setfield(L, -2, "kv_get");
+    lua_pushcfunction(L, luaOnionKvDel);
+    lua_setfield(L, -2, "kv_del");
     lua_pushcfunction(L, luaOnionHttpGet);
     lua_setfield(L, -2, "http_get");
     lua_pushcfunction(L, luaOnionHttpPost);
@@ -4760,11 +5449,7 @@ static void registerOnionLua(lua_State* L) {
     lua_setfield(L, -2, "display_pixel");
     lua_pushcfunction(L, luaOnionDisplayBitmap);
     lua_setfield(L, -2, "display_bitmap");
-    lua_pushcfunction(L, luaOnionKvSet);
-    lua_setfield(L, -2, "kv_set");
-    lua_pushcfunction(L, luaOnionKvGet);
-    lua_setfield(L, -2, "kv_get");
-    lua_pushcfunction(L, luaOnionKvDelete);
+    lua_pushcfunction(L, luaOnionKvDel);
     lua_setfield(L, -2, "kv_delete");
     lua_pushcfunction(L, luaOnionKvList);
     lua_setfield(L, -2, "kv_list");
@@ -4798,6 +5483,12 @@ static void registerOnionLua(lua_State* L) {
     lua_setfield(L, -2, "espnow_send");
     lua_pushcfunction(L, luaOnionEspNowReceive);
     lua_setfield(L, -2, "espnow_receive");
+    lua_pushcfunction(L, luaOnionEspNowSetPeerKey);
+    lua_setfield(L, -2, "espnow_set_peer_key");
+    lua_pushcfunction(L, luaOnionWifiDisconnect);
+    lua_setfield(L, -2, "wifi_disconnect");
+    lua_pushcfunction(L, luaOnionWifiReconnect);
+    lua_setfield(L, -2, "wifi_reconnect");
     lua_setglobal(L, "onion");
 }
 
@@ -4830,6 +5521,7 @@ static bool finishLuaRun(lua_State* L, const String& name, int status, const Str
         g_lastLuaError = err;
         lua_close(L);
         cleanupLuaRuntime();
+        // Full error to serial; the e-paper status line only fits a stub.
         Serial.printf("[onion-os] Lua error in %s: %s\n", name.c_str(), err.c_str());
         setLog("Lua error: " + clipped(err, 22));
         return false;
@@ -4857,13 +5549,17 @@ static bool prepareLuaState(lua_State*& L) {
     return true;
 }
 
-static bool runLuaSource(const String& source, const String& name) {
+static bool runLuaBuffer(const char* source, size_t sourceLen, const String& name) {
     g_lastLuaError = "";
     lua_State* L = nullptr;
     if (!prepareLuaState(L)) return false;
     String logBeforeRun = g_log;
-    int status = luaL_loadbuffer(L, source.c_str(), source.length(), name.c_str());
+    int status = luaL_loadbuffer(L, source, sourceLen, name.c_str());
     return finishLuaRun(L, name, status, logBeforeRun);
+}
+
+static bool runLuaSource(const String& source, const String& name) {
+    return runLuaBuffer(source.c_str(), source.length(), name);
 }
 
 struct LuaFileReader {
@@ -4894,10 +5590,10 @@ static bool runStoredScript(const String& path) {
         setLog("Lua script missing");
         return false;
     }
-    if (file.size() > MAX_SCRIPT_BYTES) {
-        size_t scriptSize = file.size();
+    size_t size = file.size();
+    if (size > MAX_SCRIPT_BYTES) {
         file.close();
-        g_lastLuaError = "Lua script too large: " + String(scriptSize) + " bytes";
+        g_lastLuaError = "Lua script too large: " + String(size) + " bytes";
         setLog("Lua script too large");
         return false;
     }
@@ -5366,6 +6062,13 @@ static void handleButtons() {
     } else if (g_screen == SCREEN_LUA_PROMPT) {
         if (pressed & BTN_SELECT) sendLuaPushResponse(true);
         if (pressed & BTN_CANCEL) sendLuaPushResponse(false);
+    } else if (g_screen == SCREEN_CHECKIN_PROMPT) {
+        if (pressed & BTN_SELECT) sendCheckInApproval(true);
+        if (pressed & BTN_CANCEL) sendCheckInApproval(false);
+    } else if (g_screen == SCREEN_CHECKIN_RESULT) {
+        if (pressed & (BTN_SELECT | BTN_CANCEL)) {
+            g_screen = SCREEN_STATUS;
+        }
     } else if (g_screen == SCREEN_DELETE_CONFIRM) {
         if (pressed & BTN_CANCEL) {
             g_screen = SCREEN_SCRIPT_EXPLORER;
@@ -5553,6 +6256,7 @@ void setup() {
     }
     ensureWifi();
     doHttpHandshake();
+    refreshPublicProfile();  // pull the current balance once at boot
 }
 
 void loop() {
@@ -5598,10 +6302,23 @@ void loop() {
         triggerWifiReconnect();
     }
     ensureMqtt();
+    processCheckInService();
 
     if (millis() - g_lastHandshake > HANDSHAKE_INTERVAL_MS) {
         g_lastHandshake = millis();
         if (g_mqttConnected) doMqttHandshake();
+    }
+
+    // Periodic Onion-balance refresh. Handshakes only carry onionId/status, so
+    // without this the displayed balance only updates on a manual "Refresh
+    // Profile" or a fresh link — it goes stale as soon as the server total
+    // changes. Quiet so an idle badge stays silent; skipped while offline or a
+    // WiFi worker is busy so it never blocks the UI.
+    if (WiFi.status() == WL_CONNECTED &&
+        g_wifiWorkerResult.load() != WIFI_WORKER_RUNNING &&
+        millis() - g_lastProfileRefresh > PROFILE_REFRESH_INTERVAL_MS) {
+        g_lastProfileRefresh = millis();
+        refreshPublicProfile(true);
     }
 
     redraw();

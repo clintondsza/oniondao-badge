@@ -42,6 +42,15 @@ other badge firmware in this repo.
 - Badge-owned Solana Ed25519 wallet generation.
 - ATECC608B-backed seed wrapping and approval attestation.
 - Solana transaction signing for server-built burn/transfer transactions.
+- PSRAM-backed Lua script loading (scripts up to 192 KB).
+- Lua key/value store (NVS), SHA-256, and username APIs for script state and
+  authenticated pairing.
+- Per-peer ESP-NOW LMK encryption and a 128-deep RX queue for real-time
+  streaming scripts.
+- Lua WiFi disconnect/reconnect with the 802.11 LR PHY for fixed-channel
+  ESP-NOW range.
+- Streaming-capable Sound module APIs: deep mic DMA buffering, capture stats,
+  startup-transient discard, and amp unmute/drain handling.
 
 ## Solana Key Custody
 
@@ -115,7 +124,9 @@ popup, stores approved code in SPIFFS, runs it, and responds on
 `oniondao/badge/{onionId}/lua/response` plus the HTTP fallback
 `POST /api/badge/lua-response`.
 
-Installed scripts are stored as `/scripts_*.lua`. Downloaded image assets are
+Installed scripts are stored as `/scripts_*.lua` and may be up to `192` KB;
+they are loaded through a PSRAM buffer so large scripts do not depend on
+contiguous internal heap. Downloaded image assets are
 stored as `/images_*.pbm` or `/images_*.bmp`. The badge's home menu opens a
 script explorer that lists both manifest-downloaded scripts and server-pushed
 scripts from SPIFFS. In the script explorer, selecting `Update Scripts`
@@ -138,14 +149,25 @@ Scripts receive a small global `onion` table:
 - `onion.hardware_id()` returns the badge hardware ID.
 - `onion.onion_id()` returns the current Onion ID, or `0` before handshake.
 - `onion.wallet()` returns the configured Solana public key, if any.
+- `onion.username()` returns the linked profile username, or `""` before the
+  badge is linked.
 - `onion.secure_random(count)` returns `count` random bytes (binary string)
   from the ATECC608A hardware RNG. `count` is optional and defaults to `32`
   (max `256`). Returns `nil` plus an error string if the secure element is
   unavailable.
+- `onion.sha256(data)` returns the 32-byte binary SHA-256 digest of `data`
+  (binary-safe input).
+- `onion.kv_set(key, value)` stores a binary-safe value (1-`240` bytes) in a
+  script-shared NVS namespace separate from the protected badge config. Keys
+  are 1-`15` chars. Passing `nil` as the value deletes the key. Returns `true`,
+  or `nil` plus an error string.
+- `onion.kv_get(key)` returns the stored value, or `nil` when missing.
+- `onion.kv_del(key)` deletes the key and returns `true`, or `nil` plus an
+  error string.
 - `onion.display_size()` returns `{ width = 264, height = 176 }` for the badge
   e-paper panel in landscape orientation.
-- `onion.clear_display()` clears the e-paper display and leaves Lua in control
-  of the screen until the next button press.
+- `onion.clear_display()` clears the e-paper display with a full ghost-clearing
+  refresh and leaves Lua in control of the screen until the next button press.
 - `onion.release_display()` returns screen ownership to Onion OS after a Lua
   script has drawn to the display.
 - `onion.display_text(text, x, y, clear_or_options, font)` draws one text line.
@@ -206,7 +228,49 @@ Scripts receive a small global `onion` table:
   optional and defaults to broadcast (`ff:ff:ff:ff:ff:ff`).
 - `onion.espnow_receive(timeout_ms)` returns a packet table or `nil` on
   timeout. Packet fields are `mac`, `payload`, `message`, `len`, `rssi`, and
-  `received_at`.
+  `received_at`. Up to `128` inbound packets are queued (oldest dropped on
+  overflow), enough for a peer to keep streaming while this badge sits in an
+  e-paper refresh.
+- `onion.espnow_set_peer_key(mac, key)` enables radio-level AES-128 (LMK) for
+  one unicast peer; `key` must be exactly `16` bytes, and `nil` reverts the
+  peer to plaintext. Both sides must set the same key or unicast frames are
+  silently dropped — confirm the encrypted path still answers and fall back if
+  it goes quiet. Broadcast always stays plaintext. The firmware sets a fixed,
+  public PMK so per-peer LMKs interoperate across badges; confidentiality
+  rests entirely on the 16-byte LMK your script exchanges. Returns `true`, or
+  `false` plus an error string.
+- `onion.wifi_disconnect()` drops the AP association without turning the radio
+  off (ESP-NOW keeps working) and switches the PHY to 802.11 LR for roughly
+  2-4x badge-to-badge range. Use it before `espnow_start(channel)` to pin
+  badges that roamed to different APs onto one agreed channel. Internet, MQTT,
+  and script sync are unavailable until reconnect.
+- `onion.wifi_reconnect()` restores the normal PHY and reconnects to the
+  stored AP. The firmware also restores the PHY automatically on its own next
+  connection attempt after the script exits.
+
+### Room Check-ins
+
+Onion OS listens for trusted room beacons while WiFi is connected. Beacons use
+ESP-NOW on the room AP's channel and broadcast a compact `ONCHK1` advertisement
+containing beacon ID, room, label, RSSI threshold, and nonce. When the received
+RSSI is strong enough, the badge shows a native `CHECK IN?` prompt.
+
+If the user presses SELECT, the badge sends an ESP-NOW approval packet back to
+the beacon with hardware ID, Onion ID, username, wallet public key, RSSI, badge
+MAC, and the advertisement nonce. The beacon relays that payload to
+`POST /api/badge/checkin`; the server decides whether a workshop is active in
+that room and awards attendance points idempotently. The beacon can send a
+result packet back so the badge displays whether points were awarded.
+
+Packet layout is shared with `software/mods/checkin-beacon`:
+
+```c
+magic = "ONCHK1", version = 1
+type 1 advertise: header, beaconId[32], room[32], label[48], minRssi, nonce[8], sequence
+type 2 approve:   header, beaconId[32], nonce[8], hardwareId[65], onionId,
+                  username[32], wallet[48], rssi, approvedAt, badgeMac[6]
+type 3 result:    header, beaconId[32], nonce[8], awarded, points, message[80]
+```
 - `onion.http_get(url, options)` performs an HTTPS GET (server certificates are
   verified against the bundled root CAs) and returns `{ status, body }`, or
   `nil` plus an error string. `options` is optional and may contain `headers`
@@ -266,20 +330,33 @@ Sound — speaker (NS4168) and mic (SPH0641) are also mutually exclusive:
 
 - `onion.sound_speaker_begin(options)` starts I2S output. `options` may set
   `sample_rate` (default `44100`) and pin overrides `bclk`, `ws`, `dout`,
-  `ctrl`, `power_pin`.
+  `ctrl`, `power_pin`. The amp gets a ~`100` ms unmute soft-start and ~`31` ms
+  of silence priming so the first real samples are not clipped.
 - `onion.sound_play_tone(freq_hz, duration_ms, volume)` plays a sine tone.
   `duration_ms` defaults to `200` (max `10000`); `volume` is `0.0`–`1.0`
   (default `0.6`).
 - `onion.sound_play(pcm)` plays raw signed 16-bit little-endian mono PCM (capped
-  at 64 KB per call) and returns the number of bytes written.
-- `onion.sound_speaker_end()` stops the amplifier.
+  at 64 KB per call), blocking until written, and returns the number of bytes
+  written.
+- `onion.sound_speaker_end()` drains the pipeline (~`125` ms of silence so the
+  tail plays out) and stops the amplifier.
 - `onion.sound_mic_begin(options)` starts PDM capture. `options` may set
-  `sample_rate` (default `16000`) and pin overrides `clk`, `din`, `power_pin`.
-- `onion.sound_mic_read(num_samples)` returns up to `num_samples` (max `4096`)
-  of raw signed 16-bit PCM as a binary string.
+  `sample_rate` (default `16000`), `dma_desc`/`dma_frame` (max `64`/`2046`) to
+  deepen the capture buffer (driver default is ~90 ms; streaming scripts that
+  decode or encode between reads want e.g. `dma_desc = 16, dma_frame = 512` ≈
+  512 ms at 16 kHz), `discard_ms` (default `0`, max `1000`) to drop the mic's
+  startup transient, and pin overrides `clk`, `din`, `ws`, `ctrl`, `power_pin`.
+- `onion.sound_mic_read(num_samples, timeout_ms)` returns up to `num_samples`
+  (max `4096`) of raw signed 16-bit PCM as a binary string, plus a stats table
+  (`samples`, `bytes`, `sample_rate`, `timeout`, `total_samples`,
+  `total_bytes`, `timeouts`, `elapsed_ms`). `timeout_ms` is optional (default
+  `1000`, max `5000`); a timed-out read still returns whatever arrived, with
+  `timeout = true`.
 - `onion.sound_mic_level(duration_ms)` samples for `duration_ms` (max `1000`)
   and returns `{ rms, peak, samples }` — handy for sound-activated scripts.
-- `onion.sound_mic_end()` stops the microphone.
+- `onion.sound_mic_end()` stops the microphone and returns `true` plus a
+  totals table (`samples`, `bytes`, `duration_ms`, `timeouts`, `sample_rate`);
+  the table is omitted if the mic was not running.
 
 Modules left running are powered down automatically when the script finishes.
 
@@ -291,6 +368,13 @@ prefix. Queued MQTT payloads are capped at 512 bytes and topics at 128 bytes.
 Display option tables support `clear`, `font`, `color`, and `background`.
 Fonts are `"small"`, `"bold"`, and `"large"`. Colors are `"black"` and
 `"white"`.
+
+Lua draws go through the shared partial-refresh framebuffer: small changes (a
+menu cursor) use a fast partial refresh of the dirty region, while the first
+draw, large changes (>`75`% of the panel), and every 30th partial use a full
+~`1.7` s ghost-clearing refresh. The panel is powered off after every partial
+so the e-ink booster cannot glitch the Sound module's mic/speaker path.
+`clear_display()` always does a full refresh.
 
 GPIO `mode` is optional and may be `"input"`, `"floating"`, `"pullup"`, `"up"`,
 `"pulldown"`, or `"down"`. Lua scripts can read the side-port GPIOs only:
