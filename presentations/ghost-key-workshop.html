@@ -1,3 +1,4 @@
+
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -18,6 +19,10 @@
   }
   *{box-sizing:border-box;margin:0;padding:0}
   html,body{height:100%}
+  /* Fixed 1x design base. Each slide is authored at this size, then the auto-fit script
+     (bottom of file) scales its .wrap with transform:scale to fill the screen — bigger
+     text on big displays, overflow-proof shrink on small ones. */
+  html{font-size:16px}
   body{background:var(--bg); color:var(--ink); font-family:var(--serif); overflow:hidden; -webkit-font-smoothing:antialiased;}
   body::before{content:""; position:fixed; inset:0; z-index:0; pointer-events:none;
     background-image:linear-gradient(var(--grid) 1px,transparent 1px),linear-gradient(90deg,var(--grid) 1px,transparent 1px);
@@ -59,7 +64,7 @@
   .slide.active .wrap>*:nth-child(8){animation-delay:.46s}
   @keyframes rise{from{opacity:0;transform:translateY(15px)}to{opacity:1;transform:none}}
 
-  .eyebrow{font-family:var(--mono); text-transform:uppercase; letter-spacing:.32em; font-size:clamp(11px,1.3vw,14px);
+  .eyebrow{font-family:var(--mono); text-transform:uppercase; letter-spacing:.32em; font-size:clamp(.72rem,1.3vw,.92rem);
     color:var(--gold); margin-bottom:18px; display:flex; align-items:center; gap:12px}
   .eyebrow::before{content:""; width:26px; height:1px; background:var(--gold); display:inline-block}
   .eyebrow.red{color:var(--red)} .eyebrow.red::before{background:var(--red)}
@@ -82,7 +87,7 @@
   .card{border:1px solid var(--line); background:var(--bg2); padding:18px 17px; border-radius:3px}
   .card h3{font-family:var(--mono); text-transform:uppercase; letter-spacing:.1em; font-size:clamp(.8rem,1.5vw,1rem); margin-bottom:8px; color:var(--ink)}
   .card p{font-size:clamp(.84rem,1.55vw,1rem); line-height:1.4; color:var(--steel)}
-  .card .tag{font-family:var(--mono); font-size:11px; letter-spacing:.16em; text-transform:uppercase; color:var(--dim); display:block; margin-bottom:9px}
+  .card .tag{font-family:var(--mono); font-size:.7rem; letter-spacing:.16em; text-transform:uppercase; color:var(--dim); display:block; margin-bottom:9px}
   .card.hot{border-color:var(--gold); box-shadow:0 0 0 1px var(--gold-soft) inset, 0 0 40px -28px var(--gold)} .card.hot .tag{color:var(--gold)}
   .card.danger{border-color:rgba(255,77,77,.5)} .card.danger .tag{color:var(--red)}
   .card.cool{border-color:rgba(84,211,198,.4)} .card.cool .tag{color:var(--cyan)}
@@ -94,7 +99,7 @@
   .obj .n{font-family:var(--mono);font-size:clamp(1.3rem,2.8vw,1.9rem);font-weight:700;color:var(--gold);min-width:1.6em}
   .obj .t{font-family:var(--mono);text-transform:uppercase;letter-spacing:.08em;font-size:clamp(.92rem,1.8vw,1.15rem)}
   .obj .d{font-size:clamp(.84rem,1.55vw,1rem);color:var(--steel);margin-top:3px;text-transform:none;letter-spacing:0;font-family:var(--serif)}
-  .obj .lvl{font-family:var(--mono);font-size:10px;letter-spacing:.16em;color:var(--dim);text-transform:uppercase;text-align:right}
+  .obj .lvl{font-family:var(--mono);font-size:.65rem;letter-spacing:.16em;color:var(--dim);text-transform:uppercase;text-align:right}
   .obj.t3{border-color:var(--red)} .obj.t3 .n{color:var(--red)} .obj.t3 .lvl{color:var(--red)}
 
   ol.steps{counter-reset:s;list-style:none;margin-top:20px;display:grid;gap:11px}
@@ -113,8 +118,8 @@
   .spectrum{margin-top:24px;border:1px solid var(--line);border-radius:3px;background:var(--bg2);padding:20px 18px 14px}
   .specbar{position:relative;height:50px;border-radius:2px;background:linear-gradient(90deg,#15191f,#1c2127 50%,#15191f);border:1px solid var(--line);overflow:hidden}
   .specbar .band{position:absolute;top:0;bottom:0;background:var(--gold-soft);border-left:1px solid var(--gold);border-right:1px solid var(--gold)}
-  .specbar .lab{position:absolute;top:5px;font-family:var(--mono);font-size:11px;color:var(--gold);letter-spacing:.08em;transform:translateX(-50%)}
-  .specbar .tick{position:absolute;bottom:5px;font-family:var(--mono);font-size:10px;color:var(--steel);transform:translateX(-50%)}
+  .specbar .lab{position:absolute;top:5px;font-family:var(--mono);font-size:.7rem;color:var(--gold);letter-spacing:.08em;transform:translateX(-50%)}
+  .specbar .tick{position:absolute;bottom:5px;font-family:var(--mono);font-size:.65rem;color:var(--steel);transform:translateX(-50%)}
   .specrow{display:flex;justify-content:space-between;margin-top:11px;font-family:var(--mono);font-size:clamp(.68rem,1.35vw,.8rem);color:var(--steel);letter-spacing:.05em;text-transform:uppercase;flex-wrap:wrap;gap:4px}
 
   /* flow */
@@ -154,7 +159,7 @@
 
   /* demo cue */
   .democue{position:absolute;top:0;right:0;display:inline-flex;align-items:center;gap:8px;font-family:var(--mono);
-    text-transform:uppercase;letter-spacing:.16em;font-size:11px;color:var(--red);border:1px solid var(--red);
+    text-transform:uppercase;letter-spacing:.16em;font-size:.7rem;color:var(--red);border:1px solid var(--red);
     background:var(--red-soft);padding:6px 11px;border-radius:3px;z-index:3}
   .democue::before{content:"";width:0;height:0;border-left:7px solid var(--red);border-top:5px solid transparent;border-bottom:5px solid transparent}
   .democue.cyan{color:var(--cyan);border-color:var(--cyan);background:var(--cyan-soft)} .democue.cyan::before{border-left-color:var(--cyan)}
@@ -170,7 +175,7 @@
   /* title slides */
   #t1,#tEnd{padding:0;display:flex;align-items:center;justify-content:center;text-align:left}
   .stamp{position:absolute;top:120px;right:clamp(28px,7vw,120px);border:2px solid var(--red);color:var(--red);font-family:var(--mono);
-    text-transform:uppercase;letter-spacing:.2em;font-size:12px;font-weight:700;padding:8px 14px;transform:rotate(7deg);opacity:.92;line-height:1.4;text-align:center;z-index:3}
+    text-transform:uppercase;letter-spacing:.2em;font-size:.78rem;font-weight:700;padding:8px 14px;transform:rotate(7deg);opacity:.92;line-height:1.4;text-align:center;z-index:3}
   #t1 h1{font-size:clamp(2.6rem,11vw,7.4rem);line-height:.92} #t1 h1 .l2{color:var(--red)}
   .tagline{font-size:clamp(1.05rem,2.7vw,1.85rem);color:var(--ink);margin-top:22px;max-width:32ch}
   .subhint{font-family:var(--mono);font-size:clamp(.66rem,1.3vw,.8rem);color:var(--dim);letter-spacing:.16em;text-transform:uppercase;margin-top:14px}
@@ -190,6 +195,70 @@
     .cmp .row{grid-template-columns:1fr} .cmp .head{display:none}
     .slide{padding:104px 22px 86px}
   }
+
+  /* ===== looping concept animations ===== */
+  /* slide 5 — OOK: live-capture sweep + energized on/off segments */
+  @keyframes ookBurst{0%,100%{opacity:.5}50%{opacity:1}}
+  .anim-bursts{animation:ookBurst 1.3s ease-in-out infinite}
+  @keyframes ookOff{0%,100%{opacity:.4}50%{opacity:.85}}
+  .anim-off{animation:ookOff 1.3s ease-in-out infinite}
+
+  /* slide 7 — spectrum: scanning playhead + live bands */
+  .specscan{position:absolute;top:0;bottom:0;left:0;width:2px;
+    background:linear-gradient(var(--gold),rgba(242,177,52,.15));
+    box-shadow:0 0 14px 3px var(--gold-soft);opacity:.85;animation:specSweep 4.2s linear infinite}
+  @keyframes specSweep{0%{left:-1%}100%{left:101%}}
+  @keyframes bandGlow{0%,100%{box-shadow:0 0 3px 0 var(--gold-soft);opacity:.92}50%{box-shadow:0 0 15px 2px var(--gold);opacity:1}}
+  .spectrum .band{animation:bandGlow 2.2s ease-in-out infinite}
+
+  /* slide 8 — fixed vs rolling: sequential "press" fires */
+  @keyframes fireSame{0%,22%,100%{background:#15191f;box-shadow:0 0 0 0 rgba(255,77,77,0)}5%{background:rgba(255,77,77,.22);box-shadow:0 0 16px 1px var(--red)}}
+  @keyframes fireDiff{0%,22%,100%{background:#15191f;box-shadow:0 0 0 0 rgba(242,177,52,0)}5%{background:rgba(242,177,52,.22);box-shadow:0 0 16px 1px var(--gold)}}
+  .codes .chip.same{animation:fireSame 2.4s ease-in-out infinite}
+  .codes .chip.diff{animation:fireDiff 2.4s ease-in-out infinite}
+  .codes .chip:nth-child(2){animation-delay:.8s}
+  .codes .chip:nth-child(3){animation-delay:1.6s}
+
+  /* slide 9 — capture & replay: traveling packets + relay glow */
+  .wavearr{display:inline-block;vertical-align:middle;overflow:visible}
+  @keyframes wvFlow{0%{opacity:.12}50%{opacity:1}100%{opacity:.12}}
+  .wavearr .wv{animation:wvFlow 1.4s ease-in-out infinite}
+  .wavearr .wv2{animation-delay:.16s}
+  .wavearr .wv3{animation-delay:.32s}
+  @keyframes pktMove{0%{transform:translateX(4px);opacity:0}18%{opacity:1}82%{opacity:1}100%{transform:translateX(76px);opacity:0}}
+  .wavearr .pkt{animation:pktMove 1.4s linear infinite}
+  @keyframes nodeGold{0%,30%,100%{box-shadow:none}10%{box-shadow:0 0 28px -6px var(--gold)}}
+  @keyframes nodeRed{0%,30%,100%{box-shadow:0 0 0 1px var(--red-soft) inset}10%{box-shadow:0 0 0 1px var(--red-soft) inset,0 0 28px -5px var(--red)}}
+  .flow .node.vault{animation:nodeGold 3s ease-in-out infinite}
+  .flow .node.you{animation:nodeRed 3s ease-in-out infinite}
+  .flow .node:nth-child(3){animation-delay:.8s}
+  .flow .node:nth-child(5){animation-delay:2s}
+
+  /* pause looping CSS animations on slides that aren't on screen */
+  .slide:not(.active) .anim-bursts,
+  .slide:not(.active) .anim-off,
+  .slide:not(.active) .specscan,
+  .slide:not(.active) .spectrum .band,
+  .slide:not(.active) .codes .chip,
+  .slide:not(.active) .wavearr .wv,
+  .slide:not(.active) .wavearr .pkt,
+  .slide:not(.active) .flow .node{animation-play-state:paused}
+
+  /* ===== breakout / crowd-activity slides ===== */
+  .brk-do{border:1px solid var(--line);border-left:3px solid var(--gold);background:var(--bg2);border-radius:3px;padding:20px 24px;margin-top:6px;max-width:58ch;
+    font-size:clamp(1.08rem,2.5vw,1.6rem);line-height:1.46;color:var(--ink)}
+  .brk-do.cyan{border-left-color:var(--cyan)} .brk-do.red{border-left-color:var(--red)}
+  .brk-do strong{color:#fff}
+  .brk-hint{font-family:var(--mono);font-size:clamp(.72rem,1.4vw,.86rem);color:var(--dim);letter-spacing:.05em;text-transform:uppercase;margin-top:15px}
+  .brk-player{margin-top:24px;display:flex;align-items:center;flex-wrap:wrap;gap:8px 16px}
+  .playbtn{font-family:var(--mono);text-transform:uppercase;letter-spacing:.14em;font-weight:700;font-size:clamp(.92rem,1.7vw,1.12rem);
+    color:var(--cyan);background:var(--cyan-soft);border:1px solid var(--cyan);border-radius:3px;padding:14px 24px;cursor:pointer;
+    display:inline-flex;align-items:center;gap:11px;transition:background .15s,box-shadow .15s,color .15s}
+  .playbtn:hover{background:rgba(84,211,198,.2);box-shadow:0 0 26px -8px var(--cyan)}
+  .playbtn .ico{font-size:.85em;line-height:1}
+  .playbtn.playing{color:var(--red);border-color:var(--red);background:var(--red-soft);animation:playPulse 1.5s ease-in-out infinite}
+  @keyframes playPulse{0%,100%{box-shadow:0 0 0 0 rgba(255,77,77,0)}50%{box-shadow:0 0 26px -6px var(--red)}}
+  .freqread{font-family:var(--mono);color:var(--cyan);font-size:clamp(1rem,1.9vw,1.3rem);letter-spacing:.06em;min-width:7ch}
 </style>
 </head>
 <body>
@@ -205,13 +274,13 @@
   <div class="op"><svg class="seed" viewBox="0 0 32 40"><use href="#onion"/></svg>OPERATION: <b>GHOST KEY</b></div>
   <div class="presenter-hd">
     <span class="pname">David Steinberg</span>
-    <span class="ptg"><span class="at">@dsteinberg</span> · Telegram</span>
+    <span class="ptg"><span class="at">@dsteinberg</span> · Telegram&nbsp;&nbsp;&nbsp;<span class="at">@vid.44</span> · Signal</span>
   </div>
 </header>
 
 <footer class="bar">
   <div id="section">FIELD BRIEFING</div>
-  <div id="counter">01 / 22</div>
+  <div id="counter">01 / 25</div>
 </footer>
 <div id="progress"></div>
 <div class="peelmsg">🧅 layers revealed</div>
@@ -223,11 +292,11 @@
   <section class="slide active" data-section="Field Briefing" id="t1">
     <div class="stamp">Red Team<br>Eyes Only</div>
     <div class="wrap">
-      <div class="eyebrow">Null City // RF + Signals Track</div>
+      <div class="eyebrow">OnionDAO // RF + Signals Track</div>
       <h1>Ghost<br><span class="l2">Key</span></h1>
       <div class="tagline">Cloning a key you <span class="redt">can't see</span> — and the math that quietly tracks you.</div>
       <div class="subhint">// some keys have layers</div>
-      <div class="meta"><span>FILE <b>// SUBGHZ-01</b></span><span>CLEARANCE <b>// ATTACKER</b></span><span>SESSION <b>// 01 OF 02</b></span></div>
+      <div class="meta"><span>FILE <b>// SUBGHZ-01</b></span><span>CLEARANCE <b>// ATTACKER</b></span><span>SESSION <b>// LIVE</b></span></div>
     </div>
     <div class="bigwave"><svg viewBox="0 0 1200 120" preserveAspectRatio="none"><path d="M0,60 Q60,10 120,60 T240,60 T360,60 T480,60 T600,60 T720,60 T840,60 T960,60 T1080,60 T1200,60"/></svg></div>
   </section>
@@ -286,16 +355,22 @@
           <text x="80" y="22">1</text><text x="210" y="22">0</text><text x="340" y="22">1</text><text x="470" y="22">1</text><text x="600" y="22">0</text>
         </g>
         <!-- ON bursts -->
-        <g stroke="var(--gold)" stroke-width="2">
+        <g class="anim-bursts" stroke="var(--gold)" stroke-width="2">
           <path fill="none" d="M30,80 Q40,40 50,80 T70,80 T90,80 T110,80 T130,80"/>
           <path fill="none" d="M290,80 Q300,40 310,80 T330,80 T350,80 T370,80 T390,80"/>
           <path fill="none" d="M420,80 Q430,40 440,80 T460,80 T480,80 T500,80 T520,80"/>
         </g>
         <!-- OFF flats -->
-        <g stroke="var(--red)" stroke-width="2" stroke-dasharray="3 5">
+        <g class="anim-off" stroke="var(--red)" stroke-width="2" stroke-dasharray="3 5">
           <line x1="160" y1="120" x2="260" y2="120"/><line x1="550" y1="120" x2="650" y2="120"/>
         </g>
         <rect x="20" y="40" width="660" height="92" fill="none" stroke="rgba(255,255,255,.07)"/>
+        <!-- live capture sweep -->
+        <g>
+          <line x1="0" y1="44" x2="0" y2="128" stroke="var(--gold)" stroke-width="10" opacity="0.08"/>
+          <line x1="0" y1="44" x2="0" y2="128" stroke="var(--gold)" stroke-width="2" opacity="0.6"/>
+          <animateTransform attributeName="transform" type="translate" values="20 0;690 0" dur="2.6s" repeatCount="indefinite"/>
+        </g>
       </svg>
       <div class="note">That on/off pattern is the ENTIRE secret. The captured "OPEN" code is just a list of ons and offs — which is exactly why copying it is easy.</div>
     </div>
@@ -332,7 +407,8 @@
       <p class="body">The cheap, license-free <span class="gold">sub-GHz bands</span> run a hidden world all around this room right now:</p>
       <div class="spectrum">
         <div class="specbar">
-          <div class="band" style="left:8%;width:5%"></div><div class="band" style="left:58%;width:5%"></div><div class="band" style="left:74%;width:5%"></div>
+          <div class="specscan"></div>
+          <div class="band" style="left:8%;width:5%"></div><div class="band" style="left:58%;width:5%;animation-delay:.5s"></div><div class="band" style="left:74%;width:5%;animation-delay:1s"></div>
           <div class="lab" style="left:10.5%">433</div><div class="lab" style="left:60.5%">868</div><div class="lab" style="left:76.5%">915</div>
           <div class="tick" style="left:2.5%">300 MHz</div><div class="tick" style="left:96%">928 MHz</div>
         </div>
@@ -365,9 +441,23 @@
       <p class="body">If the code is fixed, <strong>you never have to understand it.</strong> Record the raw on/off pattern, play it back, and the vault can't tell you from the manager.</p>
       <div class="flow">
         <div class="node vault"><div class="t">Key</div><div class="s">transmits OPEN</div></div>
-        <div class="arr">))) →</div>
+        <div class="arr"><svg class="wavearr" viewBox="0 0 90 60" width="70" height="46" aria-hidden="true">
+          <g fill="none" stroke="var(--gold)" stroke-width="2">
+            <path class="wv wv1" d="M20 16 q11 14 0 28"/>
+            <path class="wv wv2" d="M36 11 q15 19 0 38"/>
+            <path class="wv wv3" d="M52 6 q19 24 0 48"/>
+          </g>
+          <circle class="pkt" cx="2" cy="30" r="3.4" fill="var(--gold)"/>
+        </svg></div>
         <div class="node you"><div class="t">You</div><div class="s">record the signal</div></div>
-        <div class="arr">→ )))</div>
+        <div class="arr"><svg class="wavearr" viewBox="0 0 90 60" width="70" height="46" aria-hidden="true">
+          <g fill="none" stroke="var(--red)" stroke-width="2">
+            <path class="wv wv1" d="M20 16 q11 14 0 28"/>
+            <path class="wv wv2" d="M36 11 q15 19 0 38"/>
+            <path class="wv wv3" d="M52 6 q19 24 0 48"/>
+          </g>
+          <circle class="pkt" cx="2" cy="30" r="3.4" fill="var(--red)"/>
+        </svg></div>
         <div class="node vault"><div class="t">Vault</div><div class="s">opens. again.</div></div>
       </div>
       <p class="body" style="margin-top:24px">No keys forged. No locks picked. You just <span class="redt">copied the air.</span></p>
@@ -405,7 +495,7 @@
       <div class="eyebrow red">Attacker Playbook · Write It Yourself</div>
       <h2>What your code<br>has to do</h2>
       <ol class="steps">
-        <li>Init your badge's <strong>CC1101</strong> (find its pins in the badge / Onion OS source).</li>
+        <li>Init your badge's <strong>CC1101</strong> (find its pins in the badge / OnionOS source).</li>
         <li>Tune to the target: <code>433.92 MHz</code>, modulation <code>ASK / OOK</code>.</li>
         <li><strong>Receive</strong> the raw on/off timing when the Key fires.</li>
         <li><strong>Store</strong> that pattern.</li>
@@ -413,7 +503,7 @@
       </ol>
       <div class="grid g2" style="margin-top:18px">
         <div class="card"><span class="tag">Tools</span><p><span class="gold">OnionDAO Badge</span> · <span class="gold">OnionOS</span> · <span class="gold">LilyGo T-Embed CC1101</span></p></div>
-        <div class="card danger"><span class="tag">Target signal</span><p class="mono" style="line-height:1.5">433.92 MHz · OOK/ASK · −10 dBm<br>Bit period <span class="gold">2000 µs</span> — 1 = on&nbsp;1500/off&nbsp;500, 0 = on&nbsp;500/off&nbsp;1500 µs<br>OPEN <span class="gold">0xACCE55</span> <span class="muted">(reads "ACCESS")</span></p></div>
+        <div class="card danger"><span class="tag">Target signal</span><p class="mono" style="line-height:1.5">433.92 MHz · OOK/ASK · −10 dBm<br>Bit <span class="gold">2000 µs</span>: 1 = on&nbsp;1500/off&nbsp;500 · 0 = on&nbsp;500/off&nbsp;1500<br>Frame 1111 + 0xCC + <span class="gold">0xACCE55</span> <span class="muted">(reads "ACCESS")</span> ×8/press<br>SAFE matches on-air <span class="gold">0xCCACCE55</span></p></div>
       </div>
       <div class="note red">The raw on/off pattern is ALL you need to copy — no decoding required. Stuck? Paste your capture into an LLM and ask.</div>
     </div>
@@ -423,20 +513,37 @@
   <section class="slide" data-section="Location Factor // The Idea">
     <div class="wrap">
       <div class="eyebrow cyan">Factor 2 · Somewhere You Are</div>
-      <h2>How anything knows<br>where you are</h2>
-      <p class="body" style="margin-bottom:4px">Measure your distance from <span class="cyt">three known points</span> and exactly one spot fits all three. That's <strong>trilateration</strong> — the engine behind GPS, cell towers, Wi-Fi positioning, Bluetooth beacons, and AirTags.</p>
-      <svg class="diagram" viewBox="0 0 680 300" role="img" aria-label="Three circles from three anchors intersecting at one point">
-        <circle cx="120" cy="220" r="200" fill="none" stroke="rgba(84,211,198,.32)" stroke-width="1.4"/>
-        <circle cx="380" cy="70" r="170" fill="none" stroke="rgba(84,211,198,.32)" stroke-width="1.4"/>
-        <circle cx="560" cy="250" r="232" fill="none" stroke="rgba(84,211,198,.32)" stroke-width="1.4"/>
-        <g font-family="var(--mono)" font-size="13">
-          <circle cx="120" cy="220" r="5" fill="#f2b134"/><text x="120" y="242" fill="#f2b134" text-anchor="middle">A1</text>
-          <circle cx="380" cy="70" r="5" fill="#f2b134"/><text x="380" y="58" fill="#f2b134" text-anchor="middle">A2</text>
-          <circle cx="560" cy="250" r="5" fill="#f2b134"/><text x="560" y="272" fill="#f2b134" text-anchor="middle">A3</text>
-          <circle cx="318" cy="206" r="6.5" fill="#ff4d4d"/><text x="318" y="192" fill="#ff4d4d" text-anchor="middle" font-weight="700">YOU</text>
-        </g>
-      </svg>
-      <div class="note">Three signals + three distances = one location. Simple geometry, enormous reach.</div>
+      <h2>How anything knows where you are</h2>
+      <div style="display:grid;grid-template-columns:1.05fr 1fr;gap:46px;align-items:center;margin-top:14px">
+        <div>
+          <p class="body">Measure your distance from <span class="cyt">three known points</span> and exactly one spot fits all three. That's <strong>trilateration</strong> — the engine behind GPS, cell towers, Wi-Fi positioning, Bluetooth beacons, and AirTags.</p>
+          <div class="note" style="margin-top:22px">Three signals + three distances = one location. Simple geometry, enormous reach.</div>
+        </div>
+        <svg class="diagram" viewBox="0 0 680 300" role="img" aria-label="Three circles from three anchors intersecting at one point" style="margin-top:0">
+          <circle cx="120" cy="220" r="198.5" fill="none" stroke="rgba(84,211,198,.32)" stroke-width="1.4"/>
+          <circle cx="380" cy="70" r="149.5" fill="none" stroke="rgba(84,211,198,.32)" stroke-width="1.4"/>
+          <circle cx="560" cy="250" r="246" fill="none" stroke="rgba(84,211,198,.32)" stroke-width="1.4"/>
+          <!-- expanding range rings: each anchor measures its distance, all meet at YOU -->
+          <circle cx="120" cy="220" r="0" fill="none" stroke="var(--cyan)" stroke-width="2">
+            <animate attributeName="r" values="0;198.5" dur="3s" repeatCount="indefinite"/>
+            <animate attributeName="opacity" values="0.85;0" dur="3s" repeatCount="indefinite"/>
+          </circle>
+          <circle cx="380" cy="70" r="0" fill="none" stroke="var(--cyan)" stroke-width="2">
+            <animate attributeName="r" values="0;149.5" dur="3s" repeatCount="indefinite"/>
+            <animate attributeName="opacity" values="0.85;0" dur="3s" repeatCount="indefinite"/>
+          </circle>
+          <circle cx="560" cy="250" r="0" fill="none" stroke="var(--cyan)" stroke-width="2">
+            <animate attributeName="r" values="0;246" dur="3s" repeatCount="indefinite"/>
+            <animate attributeName="opacity" values="0.85;0" dur="3s" repeatCount="indefinite"/>
+          </circle>
+          <g font-family="var(--mono)" font-size="13">
+            <circle cx="120" cy="220" r="5" fill="#f2b134"/><text x="120" y="242" fill="#f2b134" text-anchor="middle">A1</text>
+            <circle cx="380" cy="70" r="5" fill="#f2b134"/><text x="380" y="58" fill="#f2b134" text-anchor="middle">A2</text>
+            <circle cx="560" cy="250" r="5" fill="#f2b134"/><text x="560" y="272" fill="#f2b134" text-anchor="middle">A3</text>
+            <circle cx="318" cy="206" r="6" fill="none" stroke="#ff4d4d" stroke-width="2"><animate attributeName="r" values="6;6;24" keyTimes="0;0.8;1" dur="3s" repeatCount="indefinite"/><animate attributeName="opacity" values="0;0;0.85;0" keyTimes="0;0.8;0.9;1" dur="3s" repeatCount="indefinite"/></circle><circle cx="318" cy="206" r="6.5" fill="#ff4d4d"><animate attributeName="r" values="6.5;6.5;10;6.5" keyTimes="0;0.82;0.92;1" dur="3s" repeatCount="indefinite"/></circle><text x="318" y="192" fill="#ff4d4d" text-anchor="middle" font-weight="700">YOU</text>
+          </g>
+        </svg>
+      </div>
     </div>
   </section>
 
@@ -472,6 +579,16 @@
     </div>
   </section>
 
+  <!-- BREAKOUT — FIND THE BEACON (after Audio vs RF) -->
+  <section class="slide" data-section="Breakout // Find the Beacon" id="tBeacon">
+    <div class="wrap">
+      <div class="eyebrow cyan">Breakout · Three Volunteers</div>
+      <h2>Find the beacon</h2>
+      <div class="brk-do cyan">Three volunteers, come up and <strong>close your eyes.</strong> A tone will play from one spot in the room — point to where you think it's coming from.</div>
+      <div class="brk-hint">Everyone else — watch who gets closest.</div>
+    </div>
+  </section>
+
   <!-- 16 SIGNALS YOU BROADCAST -->
   <section class="slide" data-section="Location Factor // You Leak">
     <div class="wrap">
@@ -484,6 +601,29 @@
         <div class="card danger"><span class="tag">Everywhere</span><h3>Your patterns</h3><p>Same signals, same times, same places. Trivial to map a routine.</p></div>
       </div>
       <div class="note red">You leak your location for free. The world just has to listen.</div>
+    </div>
+  </section>
+
+  <!-- BREAKOUT — NAME COLLISION (after You Leak) -->
+  <section class="slide" data-section="Breakout // Name Collision" id="tNames">
+    <div class="wrap">
+      <div class="eyebrow red">Breakout · Everyone</div>
+      <h2>Name collision</h2>
+      <div class="brk-do red">On the card at your seat, write down <strong>5 public Wi-Fi networks</strong> your phone remembers connecting to.</div>
+      <div class="brk-hint">Think cafés, airports, hotels, the office.</div>
+    </div>
+  </section>
+
+  <!-- BREAKOUT — THE MOSQUITO TONE (before Ultrasonic) -->
+  <section class="slide" data-section="Breakout // The Mosquito Tone" id="tMosquito">
+    <div class="wrap">
+      <div class="eyebrow cyan">Breakout · Everyone</div>
+      <h2>The mosquito tone</h2>
+      <div class="brk-do cyan">Everyone <strong>stand up.</strong> Stay standing while you can hear the tone — <strong>sit down</strong> the instant it disappears.</div>
+      <div class="brk-player">
+        <button id="moBtn" class="playbtn" type="button"><span class="ico">▶</span><span class="lbl">Play sweep</span></button>
+        <span id="moFreq" class="freqread" aria-live="polite"></span>
+      </div>
     </div>
   </section>
 
@@ -504,8 +644,8 @@
     <div class="wrap">
       <div class="eyebrow gold">Putting It Together</div>
       <h2>Security has layers.<br>Yes — like an onion.</h2>
-      <div style="display:grid;grid-template-columns:1fr 1.15fr;gap:30px;align-items:center;margin-top:8px">
-        <svg viewBox="0 0 320 320" role="img" aria-label="Onion cross-section with security layers">
+      <div style="display:grid;grid-template-columns:320px 1fr;gap:44px;align-items:center;margin-top:8px">
+        <svg viewBox="0 0 320 320" role="img" aria-label="Onion cross-section with security layers" style="width:100%;height:auto">
           <g fill="none" stroke-width="2">
             <path stroke="var(--cyan)" d="M160 60 C95 60 55 130 55 200 C55 280 110 305 160 305 C210 305 265 280 265 200 C265 130 225 60 160 60 Z"/>
             <path stroke="var(--gold)" d="M160 95 C112 95 82 150 82 205 C82 268 122 288 160 288 C198 288 238 268 238 205 C238 150 208 95 160 95 Z"/>
@@ -550,7 +690,7 @@
       <div class="grid g2">
         <div class="card"><span class="tag">Harden it</span><h3>Beat your own replay</h3><p>Add a rolling code so your captured signal stops working.</p></div>
         <div class="card"><span class="tag">Go deeper on RF</span><h3>Decode, don't just copy</h3><p>Read the actual bytes; explore your badge's other radio tricks.</p></div>
-        <div class="card cool"><span class="tag">Build the WHERE factor</span><h3>Acoustic triangulation</h3><p>Code your badge to hear the beacons and place itself on a grid → then Battleship.</p></div>
+        <div class="card cool"><span class="tag">Build the WHERE factor</span><h3>Acoustic trilateration</h3><p>Code your badge to hear the beacons and place itself on a grid → then Battleship.</p></div>
         <div class="card"><span class="tag">In the wild</span><h3>Test your own gear</h3><p>Capture your own garage, doorbell, or fob — spot fixed vs rolling in real life.</p></div>
       </div>
     </div>
@@ -576,20 +716,20 @@
       <p class="body" style="max-width:78ch">Your badge has a <strong>CC1101 radio</strong> but no sub-GHz software. Write code that <span class="gold">captures the Vault Key's OPEN signal and replays it</span> to crack the vault open. LLMs welcome.</p>
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:28px;margin-top:20px">
         <div>
-          <div class="eyebrow" style="margin-bottom:12px;font-size:12px">Objectives</div>
+          <div class="eyebrow" style="margin-bottom:12px;font-size:.78rem">Objectives</div>
           <div class="obj"><div class="n">1</div><div><div class="t">Recon</div><div class="d">Prove the signal exists.</div></div></div>
           <div class="obj"><div class="n">2</div><div><div class="t">Capture</div><div class="d">Record the OPEN pattern.</div></div></div>
           <div class="obj t3"><div class="n">3</div><div><div class="t">Replay</div><div class="d">Transmit it — open the vault.</div></div></div>
         </div>
         <div>
-          <div class="eyebrow" style="margin-bottom:12px;font-size:12px">What your code does</div>
+          <div class="eyebrow" style="margin-bottom:12px;font-size:.78rem">What your code does</div>
           <ol class="steps" style="margin-top:0">
             <li>Init the CC1101 (find its pins).</li>
             <li>Tune: <code>433.92 MHz</code>, <code>OOK</code>.</li>
             <li>Receive the raw on/off timing.</li>
             <li>Store it, then transmit it back.</li>
           </ol>
-          <div class="card danger" style="margin-top:15px"><span class="tag">Target signal</span><p class="mono" style="line-height:1.5">433.92 MHz · OOK/ASK · −10 dBm<br>Bit <span class="gold">2000 µs</span>: 1 = on&nbsp;1500/off&nbsp;500 · 0 = on&nbsp;500/off&nbsp;1500<br>Frame 1111 + 0xCC + <span class="gold">0xACCE55</span> ×8/press<br>SAFE matches on-air <span class="gold">0xCCACCE55</span></p></div>
+          <div class="card danger" style="margin-top:15px"><span class="tag">Target signal</span><p class="mono" style="line-height:1.5">433.92 MHz · OOK/ASK · −10 dBm<br>Bit <span class="gold">2000 µs</span>: 1 = on&nbsp;1500/off&nbsp;500 · 0 = on&nbsp;500/off&nbsp;1500<br>Frame 1111 + 0xCC + <span class="gold">0xACCE55</span> <span class="muted">(reads "ACCESS")</span> ×8/press<br>SAFE matches on-air <span class="gold">0xCCACCE55</span></p></div>
         </div>
       </div>
       <div class="note red">The raw on/off pattern is ALL you need — no decoding. Tools: OnionDAO Badge, OnionOS, LilyGo T-Embed CC1101. Stuck? Paste your capture into an LLM.</div>
@@ -609,11 +749,31 @@
   const progressEl=document.getElementById('progress');
   const pad=n=>String(n).padStart(2,'0');
 
+  // ---- auto-fit: scale each slide's content to fill the available screen area ----
+  const headerEl=document.querySelector('header.bar');
+  const footerEl=document.querySelector('footer.bar');
+  const FIT_MAX=2.4, FIT_MARGIN=22;
+  function fitSlide(s){
+    const w=s.querySelector('.wrap'); if(!w) return;
+    w.style.transform='none';
+    const natW=w.offsetWidth, natH=w.offsetHeight; if(!natW||!natH) return;
+    const gapTop=headerEl.getBoundingClientRect().bottom;
+    const gapBot=footerEl.getBoundingClientRect().top;
+    const availH=(gapBot-gapTop)-FIT_MARGIN*2;
+    const availW=window.innerWidth-FIT_MARGIN*2;
+    let sc=Math.min(availW/natW, availH/natH, FIT_MAX);
+    if(!isFinite(sc)||sc<=0) sc=1;
+    w.style.transformOrigin='center center';
+    w.style.transform='scale('+sc.toFixed(4)+')';
+  }
+  function fitAll(){ slides.forEach(fitSlide); }
+
   function render(){
     slides.forEach((s,k)=>s.classList.toggle('active',k===i));
     sectionEl.textContent=slides[i].dataset.section||'';
     counterEl.textContent=pad(i+1)+' / '+pad(total);
     progressEl.style.width=(i/(total-1)*100)+'%';
+    fitSlide(slides[i]);
   }
   function go(n){ i=Math.max(0,Math.min(total-1,n)); render(); }
   function next(){ go(i+1); } function prev(){ go(i-1); }
@@ -631,10 +791,70 @@
   document.getElementById('deck').addEventListener('click',e=>{
     if(e.target.closest('a,button,input')) return;
     const x=e.clientX/window.innerWidth;
-    if(x>0.62) next(); else if(x<0.38) prev();
+    if(x>=0.5) next(); else prev();
   });
 
   render();
+  fitAll();
+  window.addEventListener('resize',fitAll);
+  window.addEventListener('load',fitAll);
+  document.addEventListener('fullscreenchange',()=>setTimeout(fitAll,80));
+</script>
+
+<!-- breakout: mosquito-tone frequency sweep -->
+<script>
+(function(){
+  const btn=document.getElementById('moBtn');
+  if(!btn) return;
+  const freqEl=document.getElementById('moFreq');
+  const icoEl=btn.querySelector('.ico');
+  const lblEl=btn.querySelector('.lbl');
+  const slide=document.getElementById('tMosquito');
+  const F0=4000, F1=20000, DUR=20, VOL=0.09;   // 4 kHz → 20 kHz over 20s, gentle
+  let ctx, osc, gain, raf, active=false, t0=0;
+  function fmt(f){ return f>=1000 ? (f/1000).toFixed(1)+' kHz' : Math.round(f)+' Hz'; }
+  function tick(){
+    if(!active) return;
+    const frac=Math.min((ctx.currentTime-t0)/DUR,1);
+    freqEl.textContent=fmt(F0+(F1-F0)*frac);
+    if(frac>=1){ stop(); return; }
+    raf=requestAnimationFrame(tick);
+  }
+  function start(){
+    try{
+      ctx=new (window.AudioContext||window.webkitAudioContext)();
+      if(ctx.state==='suspended') ctx.resume();
+      osc=ctx.createOscillator(); gain=ctx.createGain(); osc.type='sine';
+      t0=ctx.currentTime;
+      osc.frequency.setValueAtTime(F0,t0);
+      osc.frequency.linearRampToValueAtTime(F1,t0+DUR);
+      gain.gain.setValueAtTime(0.0001,t0);
+      gain.gain.exponentialRampToValueAtTime(VOL,t0+0.25);   // soft attack, no click
+      osc.connect(gain).connect(ctx.destination);
+      osc.start(t0); osc.stop(t0+DUR+0.05);
+      osc.onended=()=>{ if(active) stop(); };
+      active=true;
+      btn.classList.add('playing'); icoEl.textContent='■'; lblEl.textContent='Stop';
+      tick();
+    }catch(e){ /* audio unavailable */ }
+  }
+  function stop(){
+    if(!active) return; active=false;
+    cancelAnimationFrame(raf);
+    try{
+      const now=ctx.currentTime;
+      gain.gain.cancelScheduledValues(now);
+      gain.gain.setTargetAtTime(0.0001,now,0.03);            // smooth fade-out
+      osc.stop(now+0.2);
+    }catch(e){}
+    setTimeout(()=>{ try{ctx.close();}catch(e){} },250);
+    btn.classList.remove('playing'); icoEl.textContent='▶'; lblEl.textContent='Play sweep';
+    freqEl.textContent='';
+  }
+  btn.addEventListener('click',()=>{ active?stop():start(); btn.blur(); });
+  if(slide) new MutationObserver(()=>{ if(!slide.classList.contains('active')) stop(); })
+    .observe(slide,{attributes:true,attributeFilter:['class']});
+})();
 </script>
 </body>
 </html>
