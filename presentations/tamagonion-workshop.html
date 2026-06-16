@@ -1,0 +1,2137 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Tamagonion SDK — OnionDAO Badge Workshop</title>
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#0d1117;--bg2:#161b22;--bg3:#21262d;--bd:#30363d;
+  --text:#e6edf3;--dim:#8b949e;
+  --green:#3fb950;--glo:#56d364;
+  --blue:#58a6ff;--purp:#d2a8ff;--orng:#ffa657;--red:#ff7b72;--yell:#e3b341;
+  --nav:52px;
+}
+html,body{width:100%;height:100%;background:var(--bg);color:var(--text);
+  font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;
+  overflow:hidden;-webkit-font-smoothing:antialiased;font-size:15px;}
+#deck{position:fixed;inset:0;bottom:var(--nav);overflow:hidden;}
+.slide{position:absolute;inset:0;display:flex;flex-direction:column;
+  opacity:0;pointer-events:none;
+  transform:translateX(50px);
+  transition:opacity .22s cubic-bezier(.4,0,.2,1),transform .22s cubic-bezier(.4,0,.2,1);}
+.slide.active{opacity:1;pointer-events:all;transform:translateX(0)}
+.slide.out{opacity:0;transform:translateX(-50px)}
+/* header */
+.sh{display:flex;align-items:center;justify-content:space-between;
+  padding:0 28px;height:48px;border-bottom:1px solid var(--bd);
+  background:var(--bg2);flex-shrink:0;user-select:none;}
+.sh-brand{display:flex;align-items:center;gap:8px;font-size:12px;font-weight:700;
+  letter-spacing:.06em;text-transform:uppercase;color:var(--dim);}
+.sh-dot{width:22px;height:22px;border-radius:50%;
+  background:linear-gradient(135deg,var(--green),var(--glo));
+  display:flex;align-items:center;justify-content:center;font-size:13px;}
+.sh-title{font-size:13px;font-weight:600;color:var(--dim)}
+.sh-num{font-size:11px;color:var(--bd);letter-spacing:.05em}
+/* body */
+.sb{flex:1;overflow-y:auto;overflow-x:hidden;padding:18px 44px;display:flex;flex-direction:column;}
+.sb::-webkit-scrollbar{width:4px}
+.sb::-webkit-scrollbar-thumb{background:var(--bd);border-radius:2px}
+.sb-cover{display:flex;flex-direction:column;justify-content:center;
+  padding:52px 76px;min-height:100%;
+  background:radial-gradient(ellipse 70% 60% at 15% 50%,rgba(63,185,80,.09) 0%,transparent 70%);}
+/* nav */
+#nav{position:fixed;bottom:0;left:0;right:0;height:var(--nav);
+  display:flex;align-items:center;gap:10px;padding:0 20px;
+  background:var(--bg2);border-top:1px solid var(--bd);z-index:100;user-select:none;}
+.nbtn{display:flex;align-items:center;gap:5px;background:var(--bg3);
+  border:1px solid var(--bd);color:var(--text);padding:5px 16px;
+  border-radius:6px;cursor:pointer;font-size:13px;font-family:inherit;font-weight:500;
+  transition:background .1s,border-color .1s;white-space:nowrap;}
+.nbtn:hover:not(:disabled){background:var(--bd);border-color:var(--dim)}
+.nbtn:disabled{opacity:.3;cursor:default}
+.prog-wrap{flex:1;height:4px;background:var(--bg3);border-radius:2px;overflow:hidden}
+.prog-fill{height:100%;background:linear-gradient(90deg,var(--green),var(--glo));
+  border-radius:2px;transition:width .3s ease}
+.nav-c{font-size:12px;color:var(--dim);min-width:44px;text-align:center;font-variant-numeric:tabular-nums}
+.nav-hint{font-size:11px;color:var(--bd)}
+.nav-hint kbd{display:inline-block;padding:1px 4px;background:var(--bg3);
+  border:1px solid var(--bd);border-radius:3px;font-size:10px;font-family:inherit;}
+/* typography */
+h2{font-size:1.65em;font-weight:700;letter-spacing:-.01em;margin-bottom:12px}
+h3{font-size:.7em;font-weight:700;letter-spacing:.1em;text-transform:uppercase;
+  color:var(--green);margin-top:14px;margin-bottom:6px;}
+h4{font-size:.95em;font-weight:600;margin-bottom:4px}
+p{font-size:.93em;line-height:1.65;margin-bottom:6px}
+li{font-size:.93em;line-height:1.6;margin-bottom:2px}
+ul,ol{padding-left:1.3em;margin-bottom:8px}
+strong{color:var(--blue);font-weight:600}
+/* code */
+code{font-family:'JetBrains Mono','Fira Code','Cascadia Code','Menlo',monospace;
+  font-size:.83em;background:var(--bg3);color:var(--glo);padding:2px 5px;border-radius:4px;}
+pre{background:var(--bg2);border:1px solid var(--bd);border-radius:10px;
+  margin:6px 0;position:relative;overflow:hidden;}
+pre::before{content:attr(data-lang);position:absolute;top:8px;right:12px;
+  font-size:.66em;letter-spacing:.06em;text-transform:uppercase;color:var(--bd);
+  font-family:-apple-system,sans-serif;font-weight:700;pointer-events:none;}
+pre code{display:block;padding:14px 18px;font-size:.82em;line-height:1.6;
+  background:none;color:var(--text);border-radius:0;white-space:pre;overflow-x:auto;}
+.kw{color:var(--red);font-weight:500}.fn{color:var(--blue)}.str{color:var(--glo)}
+.num{color:var(--orng)}.cmt{color:var(--dim);font-style:italic}.api{color:var(--purp)}.bl{color:var(--orng)}
+/* tables */
+table{width:100%;border-collapse:collapse;font-size:.84em;margin:5px 0}
+thead th{background:var(--bg3);padding:6px 12px;text-align:left;font-size:.68em;
+  font-weight:700;letter-spacing:.07em;text-transform:uppercase;color:var(--dim);
+  border-bottom:2px solid var(--bd);}
+tbody td{padding:5px 12px;border-bottom:1px solid var(--bd);vertical-align:top;line-height:1.4}
+tbody tr:hover td{background:rgba(255,255,255,.02)}
+tbody td:first-child code{color:var(--purp)}
+tbody td:nth-child(2){color:var(--dim)}
+/* layout */
+.cols2{display:grid;grid-template-columns:1fr 1fr;gap:16px;align-items:start}
+.cols3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px}
+/* fill remaining slide height for top-level layout blocks */
+.sb > .cols2,.sb > .cols3,.sb > .qref,.sb > table{flex:1;min-height:0;}
+/* prevent fixed-size elements from being squished by flex */
+.sb > h2,.sb > h3,.sb > pre,.sb > p,.sb > hr,
+.sb > .spec-grid,.sb > .ascii,.sb > .callout,
+.sb > .callout-w,.sb > .callout-i,.sb > .callout-n{flex-shrink:0;}
+/* trailing callout acts as footer — pushed to bottom */
+.sb > .callout:last-child,.sb > .callout-w:last-child,
+.sb > .callout-i:last-child,.sb > .callout-n:last-child{margin-top:auto;}
+.card{background:var(--bg2);border:1px solid var(--bd);border-radius:10px;padding:16px 18px}
+/* callout */
+.callout{border-left:3px solid var(--green);background:rgba(63,185,80,.07);
+  border-radius:0 8px 8px 0;padding:8px 14px;margin:8px 0;}
+.callout-w{border-color:var(--yell);background:rgba(227,179,65,.07)}
+.callout-i{border-color:var(--blue);background:rgba(88,166,255,.07)}
+.callout-n{border-color:var(--purp);background:rgba(210,168,255,.07)}
+.cl{font-size:.66em;font-weight:800;letter-spacing:.1em;text-transform:uppercase;
+  margin-bottom:4px;color:var(--green);}
+.callout-w .cl{color:var(--yell)}.callout-i .cl{color:var(--blue)}.callout-n .cl{color:var(--purp)}
+.callout p{margin:0;font-size:.92em}
+/* spec */
+.spec-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:8px 0}
+.spec-card{background:var(--bg2);border:1px solid var(--bd);border-radius:8px;padding:10px 14px}
+.spec-label{font-size:.64em;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--dim);margin-bottom:4px}
+.spec-value{font-size:.95em;font-weight:700;color:var(--green)}
+/* ascii */
+.ascii{font-family:'JetBrains Mono','Fira Code','Menlo',monospace;font-size:.8em;
+  background:var(--bg2);border:1px solid var(--bd);border-radius:10px;
+  padding:10px 16px;color:var(--glo);line-height:1.5;white-space:pre;overflow-x:auto;margin:6px 0;}
+/* chip */
+.chip{display:inline-block;padding:4px 12px;border-radius:20px;background:var(--bg3);
+  border:1px solid var(--bd);font-size:.76em;font-weight:600;color:var(--dim);margin:0 5px 6px 0;}
+.chip-g{border-color:var(--green);color:var(--green);background:rgba(63,185,80,.1)}
+.chip-b{border-color:var(--blue);color:var(--blue);background:rgba(88,166,255,.1)}
+/* cover */
+.sb-cover{display:flex;flex-direction:column;justify-content:center;
+  padding:52px 76px;min-height:100%;
+  background:radial-gradient(ellipse 70% 60% at 15% 50%,rgba(63,185,80,.09) 0%,transparent 70%);}
+.cover-eyebrow{font-size:.7em;font-weight:700;letter-spacing:.14em;text-transform:uppercase;
+  color:var(--green);margin-bottom:12px;}
+.cover-h1{font-size:4em;font-weight:800;line-height:1.0;letter-spacing:-.03em;margin-bottom:12px;}
+.cover-h1 span{color:var(--green)}
+.cover-sub{font-size:1.2em;color:var(--dim);margin-bottom:32px;line-height:1.5;max-width:540px;}
+.cover-chips{margin-bottom:32px}
+.cover-stats{display:flex;gap:36px;padding-top:24px;border-top:1px solid var(--bd)}
+.stat-n{font-size:2em;font-weight:800;color:var(--green);line-height:1}
+.stat-l{font-size:.78em;color:var(--dim);margin-top:3px}
+/* challenges */
+.sb:has(>.lvl){gap:7px;}
+.lvl{display:flex;gap:12px;align-items:flex-start;background:var(--bg2);
+  border:1px solid var(--bd);border-radius:10px;padding:10px 16px;flex:1;min-height:0;}
+.lvl-icon{font-size:1.4em;flex-shrink:0;margin-top:1px}
+.lvl-body p{font-size:.86em;color:var(--dim);margin:0;line-height:1.45}
+.tag{display:inline-block;font-size:.64em;font-weight:800;letter-spacing:.08em;
+  text-transform:uppercase;padding:2px 6px;border-radius:4px;margin-bottom:4px;}
+.t1{background:rgba(63,185,80,.15);color:var(--green)}.t2{background:rgba(88,166,255,.15);color:var(--blue)}
+.t3{background:rgba(210,168,255,.15);color:var(--purp)}.t4{background:rgba(255,166,87,.15);color:var(--orng)}
+.t5{background:rgba(255,123,114,.15);color:var(--red)}
+/* quick ref */
+.qref{display:grid;grid-template-columns:1fr 1fr;grid-template-rows:1fr 1fr;gap:10px}
+.qsec{background:var(--bg2);border:1px solid var(--bd);border-radius:8px;
+  padding:14px 16px;font-family:'JetBrains Mono','Fira Code',monospace;font-size:.83em;line-height:1.9;
+  display:flex;flex-direction:column;}
+.qsec-t{font-size:.66em;font-weight:800;letter-spacing:.1em;text-transform:uppercase;
+  color:var(--green);padding-bottom:6px;margin-bottom:6px;border-bottom:1px solid var(--bd);flex-shrink:0;}
+.qa{color:var(--blue);display:block}.qd{color:var(--dim);font-size:.9em}
+/* prompt */
+.prompt{background:linear-gradient(135deg,rgba(63,185,80,.05),rgba(88,166,255,.05));
+  border:1px solid var(--bd);border-radius:10px;padding:14px 18px 14px 32px;
+  margin:10px 0;font-size:.86em;line-height:1.65;font-style:italic;color:var(--text);position:relative;}
+.prompt::before{content:'"';font-size:2.8em;line-height:1;color:var(--green);opacity:.3;
+  position:absolute;top:6px;left:8px;font-style:normal;font-weight:800;}
+.prompt p{margin:0}
+hr{border:none;border-top:1px solid var(--bd);margin:16px 0}
+
+/* ── CASUAL SLIDES ──────────────────────────────────── */
+.sb-casual{gap:20px;justify-content:center;
+  background:radial-gradient(ellipse 80% 60% at 60% 110%,rgba(63,185,80,.06) 0%,transparent 70%);}
+.csl-ey{font-size:.68em;font-weight:800;letter-spacing:.16em;text-transform:uppercase;
+  color:var(--green);margin-bottom:8px;}
+.csl-h1{font-size:2.8em;font-weight:800;line-height:1.05;letter-spacing:-.03em;
+  color:var(--text);margin:0 0 14px;}
+.csl-sub{font-size:1.02em;color:var(--dim);line-height:1.72;max-width:560px;margin-bottom:0}
+.csl-stats{display:flex;gap:28px;padding-top:16px;border-top:1px solid var(--bd);flex-shrink:0}
+.csl-sn{font-size:2em;font-weight:800;color:var(--green);line-height:1}
+.csl-sl{font-size:.74em;color:var(--dim);margin-top:3px;line-height:1.4}
+.csl-sl strong{color:var(--text);display:block}
+.csl-check{list-style:none;padding:0;margin:0;display:flex;flex-direction:column;gap:9px}
+.csl-check li{display:flex;align-items:baseline;gap:10px;font-size:.97em;color:var(--dim);line-height:1.4}
+.csl-check li::before{content:'✓';color:var(--green);font-weight:900;font-size:.95em;flex-shrink:0}
+.csl-check li strong{color:var(--text)}
+.csl-cent{display:flex;flex-direction:column;gap:12px;align-items:center}
+/* pet idea grid */
+.pet-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;flex:1;min-height:0}
+.pet-card{background:var(--bg2);border:1px solid var(--bd);border-radius:10px;
+  padding:14px 16px;display:flex;flex-direction:column;gap:7px;overflow:hidden}
+.pet-art{font-family:'JetBrains Mono','Fira Code',monospace;font-size:.82em;
+  color:var(--glo);line-height:1.5;white-space:pre;flex:1}
+.pet-name{font-weight:700;font-size:.9em;color:var(--text)}
+.pet-desc{font-size:.76em;color:var(--dim);line-height:1.4}
+
+/* ── E-INK CANVAS DEMOS ─────────────────────────────── */
+.eink-wrap{
+  display:flex;flex-direction:column;align-items:center;gap:10px;
+}
+.eink-bezel{
+  background:#1a1a1a;
+  border-radius:8px;
+  padding:7px;
+  box-shadow:0 4px 20px rgba(0,0,0,.6);
+  display:block;
+  width:100%;
+}
+.eink-canvas{
+  display:block;
+  width:100%;
+  height:auto;
+  border-radius:2px;
+}
+.demo-controls{
+  display:flex;gap:6px;flex-wrap:wrap;justify-content:center;
+}
+.dbtn{
+  padding:4px 12px;border-radius:6px;border:1px solid var(--bd);
+  background:var(--bg3);color:var(--dim);cursor:pointer;
+  font-size:11px;font-family:inherit;font-weight:600;
+  transition:background .1s,color .1s,border-color .1s;letter-spacing:.04em;
+}
+.dbtn:hover,.dbtn.on{border-color:var(--green);color:var(--green);background:rgba(63,185,80,.1)}
+.demo-label{font-size:.7em;color:var(--dim);text-align:center;margin-top:2px;letter-spacing:.06em;text-transform:uppercase}
+.demo-hint{font-size:.72em;color:var(--dim);text-align:center;margin-top:4px;font-style:italic}
+/* stage row */
+.stage-row{display:flex;gap:8px;justify-content:center;margin-top:8px}
+.stage-cell{display:flex;flex-direction:column;align-items:center;gap:4px}
+.stage-cell canvas{image-rendering:pixelated;border-radius:2px;background:#f4f4f0;
+  box-shadow:0 1px 6px rgba(0,0,0,.4);}
+.stage-cell-label{font-size:.62em;color:var(--dim);letter-spacing:.05em;text-transform:uppercase}
+
+/* animations */
+@keyframes fadeUp{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:translateY(0)}}
+.slide.active .a{animation:fadeUp .28s ease both}
+.slide.active .a:nth-child(1){animation-delay:.04s}
+.slide.active .a:nth-child(2){animation-delay:.08s}
+.slide.active .a:nth-child(3){animation-delay:.13s}
+.slide.active .a:nth-child(4){animation-delay:.18s}
+.slide.active .a:nth-child(5){animation-delay:.23s}
+.slide.active .a:nth-child(6){animation-delay:.28s}
+.slide.active .a:nth-child(7){animation-delay:.33s}
+</style>
+</head>
+<body>
+<div id="deck">
+
+<!-- ═══ SLIDE 0 · COVER ═══════════════════════════════════════ -->
+<div class="slide active">
+  <div class="sh">
+    <div class="sh-brand"><div class="sh-dot">🧅</div>OnionDAO</div>
+    <span class="sh-title"></span>
+    <span class="sh-num">Workshop 2026</span>
+  </div>
+  <div class="sb sb-cover">
+    <div class="cover-eyebrow">OnionDAO Badge Workshop</div>
+    <div class="cover-h1">Tamagonion<br><span>SDK</span></div>
+    <div class="cover-sub">Build your own virtual pet on the OnionDAO ESP32-S3 badge — one Lua file, no build step, deploy in minutes.</div>
+    <div class="cover-chips">
+      <span class="chip chip-g">ESP32-S3</span>
+      <span class="chip chip-g">E-ink 264×176</span>
+      <span class="chip chip-g">Lua 5.4</span>
+      <span class="chip">1-bit B&amp;W</span>
+      <span class="chip">No build step</span>
+      <span class="chip chip-b">WiFi · MQTT · ESP-NOW</span>
+    </div>
+    <div class="cover-stats">
+      <div><span class="stat-n">17</span><div class="stat-l">Slides</div></div>
+      <div><span class="stat-n">5</span><div class="stat-l">Challenges</div></div>
+      <div><span class="stat-n">1</span><div class="stat-l">Pet to ship</div></div>
+      <div><span class="stat-n">∞</span><div class="stat-l">Possibilities</div></div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══ CASUAL · WHAT IS TAMAGONION ══════════════════════════ -->
+<div class="slide">
+  <div class="sh">
+    <div class="sh-brand"><div class="sh-dot">🧅</div>OnionDAO</div>
+    <span class="sh-title">Wait — what is this?</span>
+    <span class="sh-num">Intro</span>
+  </div>
+  <div class="sb sb-casual">
+    <div class="cols2" style="flex:1;align-items:center;gap:40px">
+      <div>
+        <div class="csl-ey">The 30-second pitch</div>
+        <h2 class="csl-h1">A virtual pet.<br>On your badge.<br>Built by <span style="color:var(--green)">you.</span></h2>
+        <p class="csl-sub">Tamagonion is what happens when someone asks <em>"what if we put a Tamagotchi on the OnionDAO badge?"</em> and nobody says no.<br><br>
+        Your creature eats, sleeps, gets sad when ignored, and evolves as it ages — all running on real hardware buttons you hold in your hand.</p>
+        <div class="csl-stats">
+          <div><div class="csl-sn">1</div><div class="csl-sl"><strong>Lua file</strong>whole game</div></div>
+          <div><div class="csl-sn">0</div><div class="csl-sl"><strong>build steps</strong>flash &amp; run</div></div>
+          <div><div class="csl-sn">~15m</div><div class="csl-sl"><strong>to a live pet</strong>from scratch</div></div>
+          <div><div class="csl-sn">∞</div><div class="csl-sl"><strong>possible pets</strong>whatever you want</div></div>
+        </div>
+      </div>
+      <div class="csl-cent">
+        <div class="eink-bezel" style="width:100%">
+          <canvas class="eink-canvas" id="demo-intro" width="264" height="176"></canvas>
+        </div>
+        <div class="demo-hint">Your pet, live on the badge display</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══ SLIDE 1 · THE BADGE ══════════════════════════════════ -->
+<div class="slide">
+  <div class="sh">
+    <div class="sh-brand"><div class="sh-dot">🧅</div>OnionDAO</div>
+    <span class="sh-title">01 — The Badge</span>
+    <span class="sh-num">1 / 18</span>
+  </div>
+  <div class="sb">
+    <h2 class="a">Hardware Overview</h2>
+    <div class="spec-grid a">
+      <div class="spec-card"><div class="spec-label">Processor</div><div class="spec-value">ESP32-S3</div></div>
+      <div class="spec-card"><div class="spec-label">Display</div><div class="spec-value">264×176 e-ink</div></div>
+      <div class="spec-card"><div class="spec-label">Color depth</div><div class="spec-value">1-bit B&amp;W</div></div>
+      <div class="spec-card"><div class="spec-label">Full refresh</div><div class="spec-value">~1.5 s</div></div>
+      <div class="spec-card"><div class="spec-label">Partial refresh</div><div class="spec-value">~0.5 s</div></div>
+      <div class="spec-card"><div class="spec-label">Language</div><div class="spec-value">Lua 5.4</div></div>
+    </div>
+    <div class="cols2 a">
+      <div>
+        <h3>Button Layout</h3>
+        <div class="ascii">  ┌────────────────────────┐
+  │  OnionDAO Badge        │
+  │  ┌──────────────────┐  │
+  │  │  264 × 176 px    │  │
+  │  │  e-ink display   │  │
+  │  └──────────────────┘  │
+  │  [L]  [R]  [U]  [D]  │
+  │  [SELECT]  [CANCEL]   │
+  └────────────────────────┘</div>
+      </div>
+      <div>
+        <h3>Connectivity</h3>
+        <ul>
+          <li>NVS key-value store — survives reboots</li>
+          <li>SPIFFS — scripts &amp; image assets</li>
+          <li>WiFi + HTTP client</li>
+          <li>MQTT publish/subscribe</li>
+          <li>ESP-NOW device-to-device radio</li>
+        </ul>
+        <h3>Sound</h3>
+        <ul>
+          <li>Tone synthesis (hz, ms, vol)</li>
+          <li>PCM audio playback + microphone</li>
+        </ul>
+      </div>
+    </div>
+    <div class="callout a">
+      <div class="cl">Key Point</div>
+      <p>Your entire game is <strong>one .lua file, no build step</strong>. Flash and run immediately.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ═══ SLIDE 2 · SCREEN LAYOUT ══════════════════════════════ -->
+<div class="slide">
+  <div class="sh">
+    <div class="sh-brand"><div class="sh-dot">🧅</div>OnionDAO</div>
+    <span class="sh-title">02 — Screen Layout</span>
+    <span class="sh-num">2 / 18</span>
+  </div>
+  <div class="sb">
+    <h2 class="a">264 × 176 Canvas</h2>
+    <div class="cols2 a">
+      <div>
+        <div class="ascii">┌──────────────────────────────┐ y=0
+│ PETNAME   STAGE       D3    │ header (29px)
+├──────────────────────────────┤ y=29
+│                              │
+│          [creature]          │ creature zone
+│          cx=132, cy=70       │ (~77px tall)
+│                              │
+├──────────────────────────────┤ y=107
+│ HUN [████████░░]            │ y=108
+│ HAP [██████░░░░]            │ y=119
+│ NRG [████░░░░░░]            │ y=130
+│ HLT [██████████]            │ y=141
+├──────────────────────────────┤ y=153 divider
+│ FEED │ PLAY │ SLEEP │  MED  │ y=154..175
+└──────────────────────────────┘ y=176</div>
+        <h3>Layout Constants</h3>
+        <pre class="lua" data-lang="lua"><code>local W, H       = 264, 176
+local CHAR_W     = 11   -- FreeMono xAdvance
+local ACT_BY     = 154  -- action bar top y
+local ACT_BH     = 22   -- action bar height
+local ACT_BW     = 66   -- W/4, one button
+local ACT_TEXT_Y = 171  -- text baseline</code></pre>
+      </div>
+      <div>
+        <h3>Live Layout Preview</h3>
+        <div class="eink-wrap">
+          <div class="eink-bezel">
+            <canvas class="eink-canvas" id="demo-layout" width="264" height="176"></canvas>
+          </div>
+          <div class="demo-controls">
+            <button class="dbtn on" onclick="showLayout('zones')">Zone Map</button>
+            <button class="dbtn" onclick="showLayout('game')">Game Screen</button>
+          </div>
+          <div class="demo-hint">Click to toggle view</div>
+        </div>
+        <div class="callout callout-i" style="margin-top:14px">
+          <div class="cl">Font note</div>
+          <p>FreeMono 9pt — <strong>11 px per character</strong> regardless of bold/regular. Use <code>#str * 11</code> for exact width.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══ SLIDE 3 · THE GAME LOOP ══════════════════════════════ -->
+<div class="slide">
+  <div class="sh">
+    <div class="sh-brand"><div class="sh-dot">🧅</div>OnionDAO</div>
+    <span class="sh-title">03 — The Game Loop</span>
+    <span class="sh-num">3 / 18</span>
+  </div>
+  <div class="sb">
+    <h2 class="a">Every Tamagonion Script Follows This Pattern</h2>
+    <pre class="lua a" data-lang="lua"><code>-- 1. Load saved state
+load_pet()
+
+-- 2. Ghost-clear (full refresh before first frame)
+onion.display_begin(); onion.clear_display(); onion.display_commit()
+
+-- 3. Drain held buttons
+local last = onion.buttons()
+while last.left or last.right or last.select or last.cancel do
+    onion.sleep(50); last = onion.buttons()
+end
+
+-- 4. State flags
+local tick_acc   = 0
+local last_ms    = onion.millis()
+local needs_full = true   -- triggers full refresh + clear_display
+local needs_bar  = false  -- triggers partial refresh (action bar only)
+
+-- 5. Main loop
+while true do
+    local now_t = onion.millis()
+    local dt    = now_t - last_ms
+    if dt &lt; 0 then dt = 0 end
+    last_ms = now_t
+
+    -- Accumulate time, fire stat ticks
+    tick_acc = tick_acc + dt
+    while tick_acc >= TICK_MS do
+        tick_acc  = tick_acc - TICK_MS
+        tick_stats()
+        needs_full = true
+    end
+
+    -- Handle buttons (edge detection)
+    local btns = onion.buttons()
+    if btns.left and not last.left then sel=(sel-1+4)%4; needs_bar=true end
+    last = btns
+
+    -- Render exactly once per loop
+    if needs_full then
+        needs_full = false; needs_bar = false
+        render_main(sel, feedback)
+    elseif needs_bar then
+        needs_bar = false
+        render_action_bar_only(sel)
+    end
+
+    onion.sleep(20)
+end</code></pre>
+    <div class="cols2 a">
+      <div class="callout">
+        <div class="cl">Key Rule</div>
+        <p><strong>Never call render inside button handlers.</strong> Set a flag, render in one place at the bottom of the loop.</p>
+      </div>
+      <div class="callout callout-i">
+        <div class="cl">Two-tier refresh</div>
+        <p><code>needs_full</code> → <code>clear_display()</code> + full redraw (~1.5 s)<br>
+        <code>needs_bar</code> → partial redraw of action bar only (~0.5 s)</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══ SLIDE 4 · DRAWING API ════════════════════════════════ -->
+<div class="slide">
+  <div class="sh">
+    <div class="sh-brand"><div class="sh-dot">🧅</div>OnionDAO</div>
+    <span class="sh-title">04 — Drawing API</span>
+    <span class="sh-num">4 / 18</span>
+  </div>
+  <div class="sb">
+    <h2 class="a">All Drawing Happens Inside <code>begin / commit</code></h2>
+    <div class="cols2 a">
+      <div>
+        <pre class="lua" data-lang="lua"><code>onion.display_begin()
+
+onion.clear_display()       -- white fill
+
+-- Shapes
+onion.display_rect(x, y, w, h,
+    {fill=true, color="black"})
+onion.display_rect(x, y, w, h,
+    {fill=false})           -- outline
+onion.display_circle(cx, cy, r,
+    {fill=true, color="black"})
+onion.display_round_rect(x,y,w,h,r,
+    {fill=true})
+onion.display_triangle(
+    x0,y0, x1,y1, x2,y2,
+    {fill=true})
+
+-- Lines &amp; pixels
+onion.display_line(x0, y0, x1, y1)
+onion.display_pixel(x, y)
+
+-- Text (baseline_y = bottom of text)
+onion.display_text("Hello", x, 21,
+    {font="small", color="black"})
+onion.display_text("Bold",  x, 21,
+    {font="bold",  color="white"})
+onion.display_lines(
+    {"L1","L2"}, x, y, 12,
+    {clear=false})
+
+onion.display_commit()      -- flush</code></pre>
+        <div class="callout callout-n">
+          <div class="cl">Erase tip</div>
+          <p>Use <code>{fill=true, color="white"}</code> to carve shapes from a black filled area.</p>
+        </div>
+      </div>
+      <div>
+        <h3>Live Output — Animated</h3>
+        <div class="eink-wrap">
+          <div class="eink-bezel">
+            <canvas class="eink-canvas" id="demo-prim" width="264" height="176"></canvas>
+          </div>
+          <div class="demo-controls">
+            <button class="dbtn" id="btn-replay-prim" onclick="animatePrimitives()">▶ Replay</button>
+          </div>
+          <div class="demo-hint">Shapes draw in sequence as the code runs</div>
+        </div>
+        <h3>Fonts</h3>
+        <table>
+          <thead><tr><th>font=</th><th>Width/char</th><th>Use</th></tr></thead>
+          <tbody>
+            <tr><td><code>"small"</code></td><td>11 px</td><td>Stats, labels, body</td></tr>
+            <tr><td><code>"bold"</code></td><td>11 px</td><td>Headers, emphasis</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══ SLIDE 5 · CHARACTER: SHAPES ═════════════════════════ -->
+<div class="slide">
+  <div class="sh">
+    <div class="sh-brand"><div class="sh-dot">🧅</div>OnionDAO</div>
+    <span class="sh-title">05 — Character: Shapes</span>
+    <span class="sh-num">5 / 18</span>
+  </div>
+  <div class="sb">
+    <h2 class="a">Design Your Pet With Primitives</h2>
+    <div class="cols2 a">
+      <div>
+        <pre class="lua" data-lang="lua"><code>-- frame=0 idle, frame=1 dance
+local function draw_blob(
+        cx, cy, r, frame,
+        happy, sick, sleeping)
+    -- Body outline
+    onion.display_circle(cx, cy, r+2,
+        {fill=true, color="black"})
+    onion.display_circle(cx, cy, r,
+        {fill=true, color="white"})
+    -- Eyes
+    if sick then
+        onion.display_line(
+            cx-7,cy-6, cx-3,cy-2)
+        onion.display_line(
+            cx-3,cy-6, cx-7,cy-2)
+    elseif sleeping then
+        onion.display_line(
+            cx-7,cy-4, cx-3,cy-4)
+    else
+        onion.display_circle(
+            cx-5,cy-4, 3,
+            {fill=true,color="black"})
+        onion.display_circle(
+            cx+5,cy-4, 3,
+            {fill=true,color="black"})
+    end
+    -- Mouth
+    if happy then
+        onion.display_line(
+            cx-5,cy+6, cx,cy+10)
+        onion.display_line(
+            cx,cy+10, cx+5,cy+6)
+    else
+        onion.display_line(
+            cx-5,cy+10, cx,cy+6)
+        onion.display_line(
+            cx,cy+6, cx+5,cy+10)
+    end
+    -- Arms (frame-dependent)
+    local dy = frame==1 and -8 or 6
+    onion.display_line(
+        cx-(r+2),cy+2, cx-(r+9),cy+dy)
+    onion.display_line(
+        cx+(r+2),cy+2, cx+(r+9),cy+dy)
+end</code></pre>
+      </div>
+      <div>
+        <h3>Interactive Preview</h3>
+        <div class="eink-wrap">
+          <div class="eink-bezel">
+            <canvas class="eink-canvas" id="demo-blob" width="264" height="176"></canvas>
+          </div>
+          <div class="demo-controls">
+            <button class="dbtn on" onclick="showBlob('happy',this)">Happy</button>
+            <button class="dbtn" onclick="showBlob('sad',this)">Sad</button>
+            <button class="dbtn" onclick="showBlob('sick',this)">Sick</button>
+            <button class="dbtn" onclick="showBlob('sleeping',this)">Sleeping</button>
+            <button class="dbtn" onclick="showBlob('dance',this)">Dance!</button>
+          </div>
+          <div class="demo-hint">Click to change state</div>
+        </div>
+        <h3>Stage Sizes</h3>
+        <div class="stage-row" id="stage-row"></div>
+        <div class="callout callout-i" style="margin-top:10px">
+          <div class="cl">Design tips</div>
+          <p>Build center-out. Use <code>color="white"</code> fill to carve. Change arm endpoints between <code>frame=0</code> and <code>frame=1</code>.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══ SLIDE 6 · CHARACTER: ASCII ART ══════════════════════ -->
+<div class="slide">
+  <div class="sh">
+    <div class="sh-brand"><div class="sh-dot">🧅</div>OnionDAO</div>
+    <span class="sh-title">06 — Character: ASCII Art</span>
+    <span class="sh-num">6 / 18</span>
+  </div>
+  <div class="sb">
+    <h2 class="a">Text-Art Creatures via <code>display_lines()</code></h2>
+    <div class="cols2 a">
+      <div>
+        <pre class="lua" data-lang="lua"><code>-- Define sprite frames as arrays
+local ASCII_IDLE  = {"  (o_o)  ","  [   ]  ","  /| |\\  "}
+local ASCII_HAPPY = {"  (^_^)  ","  [   ]  ","  /| |\\  "}
+local ASCII_SICK  = {"  (x_x)  ","  [   ]  ","   | |   "}
+local ASCII_DANCE = {
+    {"  \\(^_^)/  ","    |||    ","   /   \\   "},
+    {"   (^_^)   ","  \\[   ]/  ","    | |    "},
+}
+
+-- Draw the creature
+local function draw_ascii(happy, sick)
+    local art = sick and ASCII_SICK
+             or (happy and ASCII_HAPPY
+             or ASCII_IDLE)
+    onion.display_lines(art, 88, 40, 16,
+        {clear=false, font="small"})
+end
+
+-- Animate the dance
+local function play_ascii_dance()
+    for _ = 1, 4 do
+        for _, frame in ipairs(ASCII_DANCE) do
+            onion.display_begin()
+            onion.display_rect(64,29,136,78,
+                {fill=true,color="white"})
+            onion.display_lines(frame,72,36,16,
+                {clear=false,font="small"})
+            onion.display_commit()
+            onion.sleep(300)
+        end
+    end
+end
+
+-- ASCII stat bar
+local function ascii_bar(val, max, w)
+    local f = math.floor(val * w / max)
+    return "[" .. string.rep("#",f)
+        .. string.rep(".",w-f) .. "]"
+end
+-- Output: HUN [########..]</code></pre>
+      </div>
+      <div>
+        <h3>Live Animation</h3>
+        <div class="eink-wrap">
+          <div class="eink-bezel">
+            <canvas class="eink-canvas" id="demo-ascii" width="264" height="176"></canvas>
+          </div>
+          <div class="demo-controls">
+            <button class="dbtn" id="btn-ascii-play" onclick="toggleAsciiAnim()">⏸ Pause</button>
+            <span id="ascii-frame-label" class="demo-label">IDLE</span>
+          </div>
+          <div class="demo-hint">Auto-cycles through all expression states</div>
+        </div>
+        <div class="callout callout-i" style="margin-top:10px">
+          <div class="cl">Partial refresh trick</div>
+          <p>Erase <em>only</em> the creature zone with white rect, then draw next frame. Uses partial refresh (~0.5 s) instead of full clear (~1.5 s) for smooth animation.</p>
+        </div>
+        <div class="callout callout-n" style="margin-top:8px">
+          <div class="cl">Fallback pattern</div>
+          <p>Check <code>onion.images()</code> for sprites, fall back to ASCII if none found. Works offline from a single .lua file.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══ CASUAL · MAKE IT YOURS ════════════════════════════════ -->
+<div class="slide">
+  <div class="sh">
+    <div class="sh-brand"><div class="sh-dot">🧅</div>OnionDAO</div>
+    <span class="sh-title">Your pet can be anything</span>
+    <span class="sh-num">Inspiration</span>
+  </div>
+  <div class="sb sb-casual">
+    <div style="flex-shrink:0">
+      <div class="csl-ey">The best part</div>
+      <h2 style="font-size:1.7em;font-weight:800;letter-spacing:-.02em;margin-bottom:6px">
+        The API doesn't know or care what you're drawing.<br>
+        <span style="color:var(--green)">Make something weird.</span>
+      </h2>
+      <p style="color:var(--dim);font-size:.93em;margin-bottom:0">These took 5–10 minutes each. All circles, lines, and text.</p>
+    </div>
+    <div class="pet-grid">
+      <div class="pet-card">
+        <div class="pet-art">  (^_^)
+  [   ]
+  /| |\</div>
+        <div class="pet-name">Blob — the classic</div>
+        <div class="pet-desc">Simple. Lovable. Probably what you'll ship. No judgment.</div>
+      </div>
+      <div class="pet-card">
+        <div class="pet-art">  /~~\
+ ( o o )
+  | u |
+  \--/</div>
+        <div class="pet-name">Ghost</div>
+        <div class="pet-desc">Haunts your wallet. Stage 5 unlocks laser eyes and a vengeance arc.</div>
+      </div>
+      <div class="pet-card">
+        <div class="pet-art"> [*_*]
+  |=|
+ /===\</div>
+        <div class="pet-name">Robot</div>
+        <div class="pet-desc">Emotionally unavailable. No sad state — only "operating within expected parameters."</div>
+      </div>
+      <div class="pet-card">
+        <div class="pet-art">\(o.o)/
+  (=)
+ /| |\</div>
+        <div class="pet-name">Crab</div>
+        <div class="pet-desc">Only one mood: crab rave. All actions map to sideways movement.</div>
+      </div>
+      <div class="pet-card">
+        <div class="pet-art">  ___
+ /   \
+( .O. )
+ \___/</div>
+        <div class="pet-name">Onion (flagship)</div>
+        <div class="pet-desc">Technically the most on-brand pet you can ship to a crypto conference.</div>
+      </div>
+      <div class="pet-card" style="background:linear-gradient(135deg,rgba(63,185,80,.07),rgba(88,166,255,.06));border-color:var(--green);border-style:dashed">
+        <div class="pet-art" style="color:var(--bd)">  ???
+  [   ]
+  /| |\</div>
+        <div class="pet-name" style="color:var(--green)">Yours — for real though</div>
+        <div class="pet-desc" style="color:var(--dim)">You have 30 minutes and a full drawing API. We believe in you.</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══ SLIDE 7 · CHARACTER: BITMAPS ════════════════════════ -->
+<div class="slide">
+  <div class="sh">
+    <div class="sh-brand"><div class="sh-dot">🧅</div>OnionDAO</div>
+    <span class="sh-title">07 — Character: Bitmaps</span>
+    <span class="sh-num">7 / 18</span>
+  </div>
+  <div class="sb">
+    <h2 class="a">Pixel-Art Sprites via PBM + SPIFFS</h2>
+    <div class="cols2 a">
+      <div>
+        <h3>PBM Format (P1 text)</h3>
+        <pre data-lang="pbm"><code>P1
+# My pet idle pose  57x40
+57 40
+0 0 0 1 1 1 1 1 0 0 0 ...
+0 0 1 0 0 0 0 0 1 0 0 ...
+...</code></pre>
+        <p><code>0</code> = white, <code>1</code> = black. Create in any image editor or by hand.</p>
+        <h3>Loading at Runtime</h3>
+        <pre class="lua" data-lang="lua"><code>local imgs = onion.images()
+local has_sprites = false
+for _, name in ipairs(imgs) do
+    if name == "mypet_idle.pbm" then
+        has_sprites = true; break
+    end
+end
+
+if has_sprites then
+    onion.display_bitmap(
+        "mypet_idle.pbm", 104, 30,
+        {clear=false})
+else
+    draw_ascii_creature(true, false)
+end</code></pre>
+      </div>
+      <div>
+        <h3>Manifest (script + images)</h3>
+        <pre class="json" data-lang="json"><code>{
+  "scripts": [{
+    "name": "mypet.lua",
+    "url": "https://yourhost.com/mypet.lua"
+  }],
+  "images": [{
+    "name": "mypet_idle.pbm",
+    "url": "https://yourhost.com/idle.pbm"
+  },{
+    "name": "mypet_happy.pbm",
+    "url": "https://yourhost.com/happy.pbm"
+  }]
+}</code></pre>
+        <p>On badge: <strong>Settings → Script URL → Sync</strong></p>
+        <div class="callout callout-n">
+          <div class="cl">Fallback pattern</div>
+          <p>Always implement an ASCII art fallback. Sprites require hosting; ASCII art works offline from the single .lua file.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══ SLIDE 8 · STATS & GAME LOGIC ════════════════════════ -->
+<div class="slide">
+  <div class="sh">
+    <div class="sh-brand"><div class="sh-dot">🧅</div>OnionDAO</div>
+    <span class="sh-title">08 — Stats &amp; Game Logic</span>
+    <span class="sh-num">8 / 18</span>
+  </div>
+  <div class="sb">
+    <h2 class="a">Pet State, Ticks &amp; Stage Progression</h2>
+    <div class="cols2 a">
+      <div>
+        <h3>Pet State</h3>
+        <pre class="lua" data-lang="lua"><code>local MAX_STAT = 10
+local pet = {
+    hunger=MAX_STAT, happiness=MAX_STAT,
+    energy=MAX_STAT, health=MAX_STAT,
+    age_ticks=0, stage=0,
+    alive=true, sleeping=false,
+}
+local function cstat(v)
+    return math.max(0,math.min(MAX_STAT,v))
+end</code></pre>
+        <h3>Stage Thresholds</h3>
+        <pre class="lua" data-lang="lua"><code>local TICK_MS    = 120000  -- 2 min/tick
+local STAGE_TICKS = {
+    [0]=0,[1]=3,[2]=20,[3]=60,[4]=120
+}
+local function stage_for(ticks)
+    for i=4,0,-1 do
+        if ticks >= STAGE_TICKS[i] then
+            return i
+        end
+    end
+    return 0
+end</code></pre>
+      </div>
+      <div>
+        <h3>Tick (called every TICK_MS)</h3>
+        <pre class="lua" data-lang="lua"><code>local function tick_stats()
+    if not pet.alive then return end
+    pet.age_ticks = pet.age_ticks + 1
+    pet.stage     = stage_for(pet.age_ticks)
+
+    if pet.sleeping then
+        pet.energy    = cstat(pet.energy + 3)
+        pet.happiness = cstat(pet.happiness + 1)
+        if pet.energy >= MAX_STAT then
+            pet.sleeping = false
+        end
+        return
+    end
+    -- Decay each tick
+    pet.hunger = cstat(pet.hunger - 1)
+    pet.energy = cstat(pet.energy - 1)
+    if pet.age_ticks % 2 == 0 then
+        pet.happiness = cstat(pet.happiness-1)
+    end
+    -- Health consequences
+    if pet.hunger    == 0 then
+        pet.health = cstat(pet.health - 2) end
+    if pet.happiness == 0 then
+        pet.health = cstat(pet.health - 1) end
+    if pet.hunger >= 7 and
+       pet.happiness >= 5 and
+       pet.energy   >= 5 then
+        pet.health = cstat(pet.health + 1)
+    end
+    if pet.health == 0 then pet.alive = false end
+end</code></pre>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══ SLIDE 9 · PERSISTENCE ════════════════════════════════ -->
+<div class="slide">
+  <div class="sh">
+    <div class="sh-brand"><div class="sh-dot">🧅</div>OnionDAO</div>
+    <span class="sh-title">09 — Persistence (NVS)</span>
+    <span class="sh-num">9 / 18</span>
+  </div>
+  <div class="sb">
+    <h2 class="a">Save State Across Reboots</h2>
+    <div class="cols2 a">
+      <div>
+        <h3>save_pet()</h3>
+        <pre class="lua" data-lang="lua"><code>local function save_pet()
+    if not onion.kv_set then return end
+    onion.kv_set("pet", string.format(
+        '{"h":%d,"hp":%d,"e":%d,' ..
+        '"hl":%d,"a":%d,' ..
+        '"alive":%s,"sl":%s}',
+        pet.hunger, pet.happiness,
+        pet.energy, pet.health,
+        pet.age_ticks,
+        pet.alive    and "true" or "false",
+        pet.sleeping and "true" or "false"))
+end</code></pre>
+        <h3>NVS Rules</h3>
+        <ul>
+          <li>Key length ≤ 15 characters</li>
+          <li>Value is any string</li>
+          <li><code>kv_get(key)</code> → string or nil</li>
+          <li><code>kv_del(key)</code> → delete</li>
+        </ul>
+      </div>
+      <div>
+        <h3>load_pet()</h3>
+        <pre class="lua" data-lang="lua"><code>local function load_pet()
+    if not onion.kv_get then return end
+    local s = onion.kv_get("pet")
+    if not s or s == "" then return end
+    local function n(k)
+        return tonumber(
+            s:match('"'..k..'":(%d+)'))
+    end
+    if n("h")  then pet.hunger    = cstat(n("h"))  end
+    if n("hp") then pet.happiness = cstat(n("hp")) end
+    if n("e")  then pet.energy    = cstat(n("e"))  end
+    if n("hl") then pet.health    = cstat(n("hl")) end
+    if n("a")  then pet.age_ticks = n("a")         end
+    pet.alive    = (s:find('"alive":true')  ~= nil)
+    pet.sleeping = (s:find('"sl":true') ~= nil)
+    pet.stage    = stage_for(pet.age_ticks)
+end</code></pre>
+      </div>
+    </div>
+    <div class="callout callout-w a">
+      <div class="cl">When to save</div>
+      <p>Call <code>save_pet()</code> after every SELECT action and before <code>onion.release_display()</code>. NVS writes survive power cycles.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ═══ SLIDE 10 · INPUT ══════════════════════════════════════ -->
+<div class="slide">
+  <div class="sh">
+    <div class="sh-brand"><div class="sh-dot">🧅</div>OnionDAO</div>
+    <span class="sh-title">10 — Input Handling</span>
+    <span class="sh-num">10 / 18</span>
+  </div>
+  <div class="sb">
+    <h2 class="a">Edge Detection &amp; Button Actions</h2>
+    <pre class="lua a" data-lang="lua"><code>local sel  = 0       -- 0=FEED  1=PLAY  2=SLEEP  3=MED
+local last = onion.buttons()
+
+-- ── Inside the main loop: ────────────────────────────────────
+local btns = onion.buttons()
+
+-- Edge detection: fires ONCE when button goes down
+if btns.left  and not last.left  then sel = (sel-1+4)%4; needs_bar = true end
+if btns.right and not last.right then sel = (sel+1)%4;   needs_bar = true end
+if btns.up    and not last.up    then sel = 0;            needs_bar = true end
+if btns.down  and not last.down  then sel = 2;            needs_bar = true end
+
+if btns.select and not last.select then
+    local msg = perform_action(sel)
+    set_feedback(msg)
+    save_pet()
+    needs_full = true
+end
+
+if btns.cancel and not last.cancel then
+    save_pet()
+    onion.release_display()  -- return display to Onion OS
+    return                   -- exit script
+end
+
+last = btns   -- update edge-detection state</code></pre>
+    <div class="cols2 a">
+      <div class="callout">
+        <div class="cl">Button names</div>
+        <p><code>left</code> &nbsp; <code>right</code> &nbsp; <code>up</code> &nbsp; <code>down</code> &nbsp; <code>select</code> &nbsp; <code>cancel</code></p>
+      </div>
+      <div class="callout callout-i">
+        <div class="cl">Edge detection</div>
+        <p><code>btns.x and not last.x</code> fires only on the frame the button transitions from released → pressed. Without it, holding a button fires every 20 ms.</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══ SLIDE 11 · SOUND ══════════════════════════════════════ -->
+<div class="slide">
+  <div class="sh">
+    <div class="sh-brand"><div class="sh-dot">🧅</div>OnionDAO</div>
+    <span class="sh-title">11 — Sound</span>
+    <span class="sh-num">11 / 18</span>
+  </div>
+  <div class="sb">
+    <h2 class="a">Tones &amp; Audio Feedback</h2>
+    <div class="cols2 a">
+      <div>
+        <h3>API</h3>
+        <pre class="lua" data-lang="lua"><code>onion.sound_speaker_begin()
+-- hz, duration ms, vol 0.0-1.0
+onion.sound_play_tone(880, 100, 0.5)
+onion.sound_speaker_end()</code></pre>
+        <h3>Notes</h3>
+        <table>
+          <thead><tr><th>Note</th><th>Hz</th><th>Note</th><th>Hz</th></tr></thead>
+          <tbody>
+            <tr><td>C5</td><td>523</td><td>G5</td><td>784</td></tr>
+            <tr><td>E5</td><td>659</td><td>A5</td><td>880</td></tr>
+            <tr><td>F5</td><td>698</td><td>C6</td><td>1047</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div>
+        <h3>Event Sounds</h3>
+        <pre class="lua" data-lang="lua"><code>local function sound_feed()
+    onion.sound_speaker_begin()
+    onion.sound_play_tone(523, 80, 0.4)  -- C5
+    onion.sound_play_tone(659, 80, 0.4)  -- E5
+    onion.sound_speaker_end()
+end
+
+local function sound_evolve()
+    onion.sound_speaker_begin()
+    onion.sound_play_tone(523, 100, 0.5)
+    onion.sound_play_tone(659, 100, 0.5)
+    onion.sound_play_tone(784, 200, 0.7) -- G5
+    onion.sound_speaker_end()
+end
+
+local function sound_death()
+    onion.sound_speaker_begin()
+    onion.sound_play_tone(440, 200, 0.3)
+    onion.sound_play_tone(330, 300, 0.3)
+    onion.sound_play_tone(220, 500, 0.2)
+    onion.sound_speaker_end()
+end</code></pre>
+      </div>
+    </div>
+    <div class="callout callout-w a">
+      <div class="cl">Blocking call</div>
+      <p><code>sound_play_tone()</code> blocks for the full duration. Keep tones short (&lt;300 ms each) for responsive UX.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ═══ SLIDE 12 · NETWORK ════════════════════════════════════ -->
+<div class="slide">
+  <div class="sh">
+    <div class="sh-brand"><div class="sh-dot">🧅</div>OnionDAO</div>
+    <span class="sh-title">12 — Network Integration</span>
+    <span class="sh-num">12 / 18</span>
+  </div>
+  <div class="sb">
+    <h2 class="a">HTTP, MQTT &amp; ESP-NOW</h2>
+    <div class="cols2 a">
+      <div>
+        <h3>Fetch from Onion API</h3>
+        <pre class="lua" data-lang="lua"><code>local user = onion.username()
+if user and user ~= "" then
+    local res = onion.http_get(
+        "https://oniondao.dev/api/public"
+        .. "/profile/" .. user,
+        {["Accept"]="application/json"})
+    if res.status == 200 then
+        local tokens = tonumber(res.body
+            :match('"currentOnionTokens":(%d+)'))
+        if tokens and tokens >= 100 then
+            pet.happiness = cstat(
+                pet.happiness + 2)
+        end
+    end
+end</code></pre>
+        <h3>ESP-NOW (Device to Device)</h3>
+        <pre class="lua" data-lang="lua"><code>onion.espnow_start()
+onion.espnow_send(peer_mac,
+    '{"challenge":true,"stage":'
+    .. pet.stage .. '}')
+local msg = onion.espnow_receive(3000)
+if msg then
+    -- parse msg.payload and react
+end
+onion.espnow_stop()</code></pre>
+      </div>
+      <div>
+        <h3>Publish via MQTT</h3>
+        <pre class="lua" data-lang="lua"><code>local id = onion.onion_id()
+if id and onion.mqtt_connected() then
+    local topic = "oniondao/badge/"
+        .. id .. "/pet"
+    local payload = string.format(
+        '{"stage":%d,"health":%d}',
+        pet.stage, pet.health)
+    onion.mqtt_publish(
+        topic, payload, 1, true)
+end</code></pre>
+        <h3>Subscribe &amp; Receive</h3>
+        <pre class="lua" data-lang="lua"><code>local topic = "oniondao/badge/"
+    .. onion.onion_id() .. "/rival"
+onion.mqtt_subscribe(topic)
+local msg = onion.mqtt_receive(2000)
+if msg and msg.payload then
+    local rival_stage = tonumber(
+        msg.payload:match('"stage":(%d+)'))
+end</code></pre>
+        <div class="callout callout-i">
+          <div class="cl">Identity calls</div>
+          <p><code>username()</code> &nbsp; <code>onion_id()</code><br><code>hardware_id()</code> &nbsp; <code>wallet()</code></p>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══ SLIDE 13 · FULL TEMPLATE ════════════════════════════ -->
+<div class="slide">
+  <div class="sh">
+    <div class="sh-brand"><div class="sh-dot">🧅</div>OnionDAO</div>
+    <span class="sh-title">13 — Full Template</span>
+    <span class="sh-num">13 / 18</span>
+  </div>
+  <div class="sb">
+    <h2 class="a">What Your Player Sees</h2>
+    <div class="cols2 a" style="align-items:center">
+      <div>
+        <div class="callout callout-i">
+          <div class="cl">How to use</div>
+          <p>Replace <code>draw_creature()</code> with your art. Tune <code>STAGE_TICKS</code>. Change the <code>"mypet"</code> key and labels. Everything else runs as-is.</p>
+        </div>
+        <pre class="lua" data-lang="lua"><code>-- ── Render main screen ───────────────
+local function render_main(sel, fb)
+    onion.display_begin()
+    onion.clear_display()
+
+    -- Header bar (black bg)
+    onion.display_rect(0,0,W,29,
+        {fill=true,color="black"})
+    onion.display_text("MYPET",8,21,
+        {clear=false,color="white",font="bold"})
+    local stage_name = stages[pet.stage]
+    onion.display_text(stage_name,
+        cx_text(stage_name,80,104),21,
+        {clear=false,color="white",font="bold"})
+
+    -- Creature
+    local happy  = pet.happiness>=5
+                   and pet.hunger>=3
+    local sick   = pet.health&lt;=3 and pet.alive
+    draw_creature(pet.stage,0,
+        happy,sick,pet.sleeping)
+
+    -- Stat bars
+    draw_bar("HUN",108,pet.hunger)
+    draw_bar("HAP",119,pet.happiness)
+    draw_bar("NRG",130,pet.energy)
+    draw_bar("HLT",141,pet.health)
+
+    -- Divider + action bar
+    onion.display_line(0,153,W-1,153)
+    draw_action_bar(sel)
+
+    onion.display_commit()
+end</code></pre>
+      </div>
+      <div>
+        <h3>Live Game Screen Preview</h3>
+        <div class="eink-wrap">
+          <div class="eink-bezel">
+            <canvas class="eink-canvas" id="demo-game" width="264" height="176"></canvas>
+          </div>
+          <div class="demo-controls">
+            <button class="dbtn on" id="btn-sel-0" onclick="gameSelectAction(0,this)">FEED</button>
+            <button class="dbtn" id="btn-sel-1" onclick="gameSelectAction(1,this)">PLAY</button>
+            <button class="dbtn" id="btn-sel-2" onclick="gameSelectAction(2,this)">SLEEP</button>
+            <button class="dbtn" id="btn-sel-3" onclick="gameSelectAction(3,this)">MED</button>
+          </div>
+          <div class="demo-hint">Click to move action bar selection</div>
+        </div>
+        <div class="callout" style="margin-top:10px">
+          <div class="cl">This is what the badge displays</div>
+          <p>Exact 264×176 pixel output. Partial refresh only redraws the action bar row when navigating — the rest stays sharp.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══ CASUAL · YOU KNOW ENOUGH ═════════════════════════════ -->
+<div class="slide">
+  <div class="sh">
+    <div class="sh-brand"><div class="sh-dot">🧅</div>OnionDAO</div>
+    <span class="sh-title">Alright. Your turn.</span>
+    <span class="sh-num">Let's go</span>
+  </div>
+  <div class="sb sb-casual">
+    <div class="cols2" style="flex:1;align-items:center;gap:40px">
+      <div>
+        <div class="csl-ey">Status check</div>
+        <h2 class="csl-h1" style="margin-bottom:18px">You just learned<br>everything you need.<br><span style="color:var(--green)">Now build.</span></h2>
+        <ul class="csl-check">
+          <li><strong>Draw anything</strong> — shapes, text, bitmaps, ASCII art</li>
+          <li><strong>Handle input</strong> — buttons with edge detection</li>
+          <li><strong>Game loop</strong> — tick-based updates &amp; render flags</li>
+          <li><strong>Save state</strong> — pets survive reboots via NVS</li>
+          <li><strong>Play sounds</strong> — tone synthesis on any event</li>
+          <li><strong>Go online</strong> — HTTP, MQTT, ESP-NOW between badges</li>
+        </ul>
+        <div class="callout" style="margin-top:16px;flex-shrink:0">
+          <div class="cl">Next up: 5 challenge levels</div>
+          <p>Pick one. Open the template. Start typing. You have Claude, the API reference, and the whole room to help.</p>
+        </div>
+      </div>
+      <div class="csl-cent">
+        <div class="eink-bezel" style="width:100%">
+          <canvas class="eink-canvas" id="demo-ready" width="264" height="176"></canvas>
+        </div>
+        <div class="demo-hint">This is what you're shipping today</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══ SLIDE 14 · WORKSHOP CHALLENGES ══════════════════════ -->
+<div class="slide">
+  <div class="sh">
+    <div class="sh-brand"><div class="sh-dot">🧅</div>OnionDAO</div>
+    <span class="sh-title">14 — Workshop Challenges</span>
+    <span class="sh-num">14 / 18</span>
+  </div>
+  <div class="sb">
+    <h2 class="a">Pick Your Level &amp; Build</h2>
+    <div class="lvl a"><div class="lvl-icon">🟢</div><div class="lvl-body">
+      <div class="tag t1">Level 1 · Reskin</div><h4>Change your creature's look</h4>
+      <p>Replace <code>draw_creature()</code> with a cat, robot, ghost, or spaceship. Rename pet and stage labels. Flip header to white bg / black text.</p>
+    </div></div>
+    <div class="lvl a"><div class="lvl-icon">🔵</div><div class="lvl-body">
+      <div class="tag t2">Level 2 · New Mechanic</div><h4>Add a fifth stat or interaction</h4>
+      <p>Try a <code>boredom</code> stat that drains happiness faster, a TRICK action behind UP+SELECT, a coin counter from PLAY, or a mood tier that modifies decay rates.</p>
+    </div></div>
+    <div class="lvl a"><div class="lvl-icon">🟣</div><div class="lvl-body">
+      <div class="tag t3">Level 3 · ASCII Animation</div><h4>Multi-frame dance sequence</h4>
+      <p>Build 3-frame ASCII art for PLAY. Add stage-specific art (EGG → ADULT). Flash <code>"* NEEDS FOOD *"</code> across the action bar when hunger is critical.</p>
+    </div></div>
+    <div class="lvl a"><div class="lvl-icon">🟠</div><div class="lvl-body">
+      <div class="tag t4">Level 4 · Network</div><h4>Connect to the Onion ecosystem</h4>
+      <p>Publish to MQTT on evolution. Fetch Onion token balance and give bonus at ≥100 tokens. Subscribe to another badge's pet state and show a rival icon.</p>
+    </div></div>
+    <div class="lvl a"><div class="lvl-icon">🔴</div><div class="lvl-body">
+      <div class="tag t5">Level 5 · Multiplayer</div><h4>ESP-NOW pet battles</h4>
+      <p>Exchange pet stats via <code>espnow_send()</code>. Combined stats determine the winner. Show battle screen with both creatures side by side.</p>
+    </div></div>
+  </div>
+</div>
+
+<!-- ═══ SLIDE 15 · AI GUIDE WITH CLAUDE ═════════════════════ -->
+<div class="slide">
+  <div class="sh">
+    <div class="sh-brand"><div class="sh-dot">🧅</div>OnionDAO</div>
+    <span class="sh-title">15 — AI Guide with Claude</span>
+    <span class="sh-num">15 / 18</span>
+  </div>
+  <div class="sb">
+    <h2 class="a">Prompt Claude to Generate Your Pet</h2>
+    <div class="cols2 a">
+      <div>
+        <h3>Generate a Character</h3>
+        <div class="prompt"><p>I'm building a Tamagotchi-style virtual pet for an e-ink badge (264×176px, 1-bit B&amp;W). API: display_circle(cx,cy,r,{fill,color}), display_triangle(), display_round_rect(), display_line(), display_rect().<br><br>
+        Draw a <strong>[ROBOT / CAT / GHOST]</strong> centered at cx=132, cy=70 in Lua with idle (frame=0) and dance (frame=1) poses. Include happy/sad expressions and sick/sleeping eye states.</p></div>
+        <h3>Generate a Mechanic</h3>
+        <div class="prompt"><p>I have a Tamagotchi in Lua with stats 0–10. Add a "bond" stat that increases when the player plays 3 days in a row, unlocking a special appearance at bond=10. Track streak using <code>onion.kv_set/kv_get</code> with keys "bond_streak" and "bond_last_day".</p></div>
+      </div>
+      <div>
+        <h3>Full Scaffold</h3>
+        <div class="prompt"><p>Generate a complete tamagonion.lua for Onion OS:<br>
+        — Ghost with 5 stages (WISP → WRAITH)<br>
+        — Stats: hunger (FEED), happiness (HAUNT), energy (MIST), health (LIFE)<br>
+        — ASCII fallback via display_lines()<br>
+        — PLAY: 4-frame ASCII animation<br>
+        — NVS persistence with kv_set/kv_get<br>
+        — Sound effects on feed, evolve, death</p></div>
+        <h3>Debug Rendering</h3>
+        <div class="prompt"><p>I'm drawing to a 264×176 e-ink display. My character's head appears 10px too low. Character center is cx=132, cy=70. Here's my draw code: [paste]. What coordinates are wrong and why?</p></div>
+        <div class="callout callout-i">
+          <div class="cl">Install the skill</div>
+          <p>Run <code>/tamagonion a ghost with laser eyes</code> in Claude Code to generate, flash, and run a complete pet in one command.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══ SLIDE 16 · API REFERENCE ════════════════════════════ -->
+<div class="slide">
+  <div class="sh">
+    <div class="sh-brand"><div class="sh-dot">🧅</div>OnionDAO</div>
+    <span class="sh-title">16 — API Reference</span>
+    <span class="sh-num">16 / 18</span>
+  </div>
+  <div class="sb">
+    <h2 class="a">Full Onion OS Lua API</h2>
+    <div class="cols2 a">
+      <div>
+        <h3>Display</h3>
+        <table>
+          <thead><tr><th>Function</th><th>Notes</th></tr></thead>
+          <tbody>
+            <tr><td><code>display_begin()</code></td><td>Start frame batch</td></tr>
+            <tr><td><code>display_commit()</code></td><td>Flush to screen</td></tr>
+            <tr><td><code>clear_display()</code></td><td>Fill white + full refresh</td></tr>
+            <tr><td><code>release_display()</code></td><td>Return to OS before return</td></tr>
+            <tr><td><code>display_text(s,x,y,opts)</code></td><td>clear, color, font</td></tr>
+            <tr><td><code>display_lines(tbl,x,y,lh,o)</code></td><td>lh = line height px</td></tr>
+            <tr><td><code>display_rect(x,y,w,h,opts)</code></td><td>fill, color, clear</td></tr>
+            <tr><td><code>display_circle(cx,cy,r,opts)</code></td><td>fill, color</td></tr>
+            <tr><td><code>display_triangle(…,opts)</code></td><td>6 coords + opts</td></tr>
+            <tr><td><code>display_round_rect(x,y,w,h,r,o)</code></td><td>r = corner radius</td></tr>
+            <tr><td><code>display_line(x0,y0,x1,y1)</code></td><td></td></tr>
+            <tr><td><code>display_pixel(x,y,opts)</code></td><td></td></tr>
+            <tr><td><code>display_bitmap(name,x,y,opts)</code></td><td>From SPIFFS</td></tr>
+          </tbody>
+        </table>
+        <h3>Input &amp; Time</h3>
+        <table>
+          <thead><tr><th>Function</th><th>Returns</th></tr></thead>
+          <tbody>
+            <tr><td><code>buttons()</code></td><td>{left,right,up,down,select,cancel}</td></tr>
+            <tr><td><code>sleep(ms)</code></td><td>Yield</td></tr>
+            <tr><td><code>millis()</code></td><td>Monotonic ms</td></tr>
+            <tr><td><code>time()</code></td><td>SNTP wall clock</td></tr>
+          </tbody>
+        </table>
+        <h3>Storage</h3>
+        <table>
+          <thead><tr><th>Function</th><th>Notes</th></tr></thead>
+          <tbody>
+            <tr><td><code>kv_set(key, value)</code></td><td>Key ≤15 chars</td></tr>
+            <tr><td><code>kv_get(key)</code></td><td>→ string or nil</td></tr>
+            <tr><td><code>kv_del(key)</code></td><td>Delete</td></tr>
+            <tr><td><code>kv_list()</code></td><td>All keys</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div>
+        <h3>Identity</h3>
+        <table>
+          <thead><tr><th>Function</th><th>Returns</th></tr></thead>
+          <tbody>
+            <tr><td><code>hardware_id()</code></td><td>Unique badge ID</td></tr>
+            <tr><td><code>onion_id()</code></td><td>Attendee Onion ID</td></tr>
+            <tr><td><code>wallet()</code></td><td>Solana wallet address</td></tr>
+            <tr><td><code>username()</code></td><td>Attendee username</td></tr>
+          </tbody>
+        </table>
+        <h3>Network</h3>
+        <table>
+          <thead><tr><th>Function</th><th>Notes</th></tr></thead>
+          <tbody>
+            <tr><td><code>http_get(url, headers)</code></td><td>{status, body}</td></tr>
+            <tr><td><code>http_post(url,body,hdrs)</code></td><td>{status, body}</td></tr>
+            <tr><td><code>mqtt_connected()</code></td><td>bool</td></tr>
+            <tr><td><code>mqtt_subscribe(topic)</code></td><td></td></tr>
+            <tr><td><code>mqtt_publish(t,p,qos,ret)</code></td><td></td></tr>
+            <tr><td><code>mqtt_receive(timeout_ms)</code></td><td>{topic, payload}</td></tr>
+          </tbody>
+        </table>
+        <h3>Sound</h3>
+        <table>
+          <thead><tr><th>Function</th><th>Notes</th></tr></thead>
+          <tbody>
+            <tr><td><code>sound_speaker_begin()</code></td><td>Init speaker</td></tr>
+            <tr><td><code>sound_play_tone(hz,ms,vol)</code></td><td>vol 0.0–1.0, blocking</td></tr>
+            <tr><td><code>sound_speaker_end()</code></td><td>Release</td></tr>
+          </tbody>
+        </table>
+        <h3>ESP-NOW &amp; Misc</h3>
+        <table>
+          <thead><tr><th>Function</th><th>Notes</th></tr></thead>
+          <tbody>
+            <tr><td><code>espnow_start()</code></td><td></td></tr>
+            <tr><td><code>espnow_mac()</code></td><td>Own MAC string</td></tr>
+            <tr><td><code>espnow_send(mac, payload)</code></td><td></td></tr>
+            <tr><td><code>espnow_receive(timeout_ms)</code></td><td>{mac,payload,rssi}</td></tr>
+            <tr><td><code>log(msg)</code></td><td>Serial monitor</td></tr>
+            <tr><td><code>sha256(data)</code></td><td>Hex SHA-256</td></tr>
+            <tr><td><code>images()</code></td><td>SPIFFS image names</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══ SLIDE 17 · PUBLISHING ════════════════════════════════ -->
+<div class="slide">
+  <div class="sh">
+    <div class="sh-brand"><div class="sh-dot">🧅</div>OnionDAO</div>
+    <span class="sh-title">17 — Publishing Your Pet</span>
+    <span class="sh-num">17 / 18</span>
+  </div>
+  <div class="sb">
+    <h2 class="a">Share With the Community</h2>
+    <div class="cols2 a">
+      <div>
+        <h3>Publish to Script Registry</h3>
+        <pre data-lang="bash"><code>curl -X POST \
+  https://oniondao.dev/api/portal/lua-scripts \
+  -H "Cookie: &lt;your-session-cookie&gt;" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "title": "Ghost Pet",
+    "description": "A haunted tamagotchi",
+    "fileName": "ghost-pet.lua",
+    "code": "&lt;your lua code here&gt;",
+    "tags": ["pet","game","ghost"],
+    "isPublic": true
+  }'</code></pre>
+        <div class="callout">
+          <div class="cl">Result</div>
+          <p>Attendees find and install your script from the badge script browser on <strong>oniondao.dev</strong>.</p>
+        </div>
+        <h3>Push to Badge Flow</h3>
+        <ol>
+          <li>Attendee visits your script on <code>oniondao.dev</code></li>
+          <li>Clicks <strong>Push to Badge</strong></li>
+          <li>Badge shows accept/deny popup</li>
+          <li>On accept: installed and runnable immediately</li>
+        </ol>
+      </div>
+      <div>
+        <h3>Manifest Hosting</h3>
+        <pre class="json" data-lang="json"><code>{
+  "scripts": [{
+    "name": "ghost-pet.lua",
+    "url": "https://yourhost.com/ghost-pet.lua"
+  }],
+  "images": [{
+    "name": "ghost_idle.pbm",
+    "url": "https://yourhost.com/idle.pbm"
+  }]
+}</code></pre>
+        <p>Badge: <strong>Settings → Script URL → Sync</strong></p>
+        <h3>Claude Code Skill</h3>
+        <pre data-lang="bash"><code>/tamagonion a robot with laser eyes
+/tamagonion flash my-pet.lua
+/tamagonion char: a ghost in ghost.lua</code></pre>
+        <div class="callout callout-n">
+          <div class="cl">Full workshop source</div>
+          <p>All code, slides, and SDK docs in <code>software/mods/onion-os/</code> in the badge repo.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══ SLIDE 18 · QUICK REFERENCE ══════════════════════════ -->
+<div class="slide">
+  <div class="sh">
+    <div class="sh-brand"><div class="sh-dot">🧅</div>OnionDAO</div>
+    <span class="sh-title">Quick Reference</span>
+    <span class="sh-num">18 / 18</span>
+  </div>
+  <div class="sb">
+    <h2 class="a">Cheat Sheet</h2>
+    <div class="qref a">
+      <div class="qsec">
+        <div class="qsec-t">Display</div>
+        <span class="qa">display_begin()</span>
+        <span class="qa">clear_display()  &nbsp;&nbsp;&nbsp;&nbsp; -- white + full refresh</span>
+        <span class="qa">display_circle(cx, cy, r, opts)</span>
+        <span class="qa">display_rect(x, y, w, h, opts)</span>
+        <span class="qa">display_triangle(x0,y0,x1,y1,x2,y2, opts)</span>
+        <span class="qa">display_round_rect(x,y,w,h,r, opts)</span>
+        <span class="qa">display_line(x0, y0, x1, y1)</span>
+        <span class="qa">display_text(str, x, y, opts)</span>
+        <span class="qa">display_lines({...}, x, y, lh, opts)</span>
+        <span class="qa">display_bitmap(name, x, y, opts)</span>
+        <span class="qa">display_commit()  &nbsp;&nbsp;&nbsp;&nbsp;-- flush to screen</span>
+        <span class="qa">release_display() &nbsp;&nbsp;&nbsp;&nbsp;-- return to OS</span>
+      </div>
+      <div class="qsec">
+        <div class="qsec-t">Input &amp; Time</div>
+        <span class="qa">buttons() → {left,right,up,down,select,cancel}</span>
+        <span class="qa">sleep(ms)</span>
+        <span class="qa">millis() → uptime ms</span>
+        <br>
+        <div class="qsec-t">Storage</div>
+        <span class="qa">kv_set("key", "value")</span>
+        <span class="qa">kv_get("key") → string</span>
+        <span class="qa">kv_del("key")</span>
+        <br>
+        <div class="qsec-t">Sound</div>
+        <span class="qa">sound_speaker_begin()</span>
+        <span class="qa">sound_play_tone(hz, ms, vol)</span>
+        <span class="qa">sound_speaker_end()</span>
+      </div>
+      <div class="qsec">
+        <div class="qsec-t">Network</div>
+        <span class="qa">http_get(url, headers)</span>
+        <span class="qa">http_post(url, body, headers)</span>
+        <span class="qa">mqtt_publish(topic, payload, qos, retain)</span>
+        <span class="qa">mqtt_receive(timeout_ms)</span>
+        <span class="qa">espnow_send(mac, payload)</span>
+        <span class="qa">espnow_receive(timeout_ms)</span>
+        <br>
+        <div class="qsec-t">Identity</div>
+        <span class="qa">username() &nbsp; onion_id()</span>
+        <span class="qa">hardware_id() &nbsp; wallet()</span>
+      </div>
+      <div class="qsec">
+        <div class="qsec-t">Layout Constants</div>
+        <span class="qa">W=264  H=176  CHAR_W=11</span>
+        <span class="qd">Header:    y=0..28  (black bg)</span>
+        <span class="qd">Creature:  cx=132, cy=70</span>
+        <span class="qd">Stats:     y=108,119,130,141</span>
+        <span class="qd">Divider:   y=153</span>
+        <span class="qd">ActionBar: y=154..175  (22px)</span>
+        <br>
+        <div class="qsec-t">Centering Text</div>
+        <span class="qa">x + floor((w - #str * 11) / 2)</span>
+        <br>
+        <div class="qsec-t">Misc</div>
+        <span class="qa">log(msg) &nbsp;&nbsp; sha256(data)</span>
+        <span class="qa">secure_random(n) &nbsp; images()</span>
+      </div>
+    </div>
+    <div class="callout callout-i a" style="margin-top:12px">
+      <div class="cl">Full SDK reference</div>
+      <p><code>software/mods/onion-os/docs/06-tamagonion-sdk.md</code> · Reference impl: <code>software/mods/onion-os/scripts/tamagonion.lua</code></p>
+    </div>
+  </div>
+</div>
+
+</div><!-- #deck -->
+
+<div id="nav">
+  <button class="nbtn" id="btn-prev" disabled>← Prev</button>
+  <div class="prog-wrap"><div class="prog-fill" id="prog-fill"></div></div>
+  <span class="nav-c" id="nav-counter">1 / 19</span>
+  <button class="nbtn" id="btn-next">Next →</button>
+  <span class="nav-hint"><kbd>←</kbd><kbd>→</kbd> navigate &nbsp; <kbd>F</kbd> fullscreen</span>
+</div>
+
+<script>
+// ══════════════════════════════════════════════════════════════
+// NAVIGATION
+// ══════════════════════════════════════════════════════════════
+const slides = [...document.querySelectorAll('.slide')];
+const total  = slides.length;
+let cur = 0;
+const $prev = document.getElementById('btn-prev');
+const $next = document.getElementById('btn-next');
+const $fill = document.getElementById('prog-fill');
+const $ctr  = document.getElementById('nav-counter');
+
+function updateUI() {
+    $fill.style.width = (total > 1 ? cur/(total-1)*100 : 0) + '%';
+    $ctr.textContent  = (cur+1)+' / '+total;
+    $prev.disabled    = cur === 0;
+    $next.disabled    = cur === total-1;
+}
+
+function goTo(n) {
+    if (n===cur || n<0 || n>=total) return;
+    stopAnimations();
+    slides[cur].classList.remove('active');
+    slides[cur].classList.add('out');
+    const prev = cur; cur = n;
+    slides[cur].classList.remove('out');
+    slides[cur].classList.add('active');
+    setTimeout(()=>slides[prev].classList.remove('out'), 280);
+    updateUI();
+    startSlideDemo(cur);
+}
+
+document.addEventListener('keydown', e=>{
+    if (['ArrowRight','ArrowDown'].includes(e.key)){e.preventDefault();goTo(cur+1)}
+    if (['ArrowLeft','ArrowUp'].includes(e.key))  {e.preventDefault();goTo(cur-1)}
+    if (e.key===' '){e.preventDefault();goTo(cur+1)}
+    if (e.key==='Home'){e.preventDefault();goTo(0)}
+    if (e.key==='End') {e.preventDefault();goTo(total-1)}
+    if (e.key.toLowerCase()==='f'){
+        if(!document.fullscreenElement) document.documentElement.requestFullscreen?.();
+        else document.exitFullscreen?.();
+    }
+});
+$prev.addEventListener('click',()=>goTo(cur-1));
+$next.addEventListener('click',()=>goTo(cur+1));
+let touchX=0;
+document.addEventListener('touchstart',e=>touchX=e.touches[0].clientX,{passive:true});
+document.addEventListener('touchend',e=>{
+    const dx=e.changedTouches[0].clientX-touchX;
+    if(Math.abs(dx)>50) goTo(dx<0?cur+1:cur-1);
+},{passive:true});
+
+// ══════════════════════════════════════════════════════════════
+// E-INK SIMULATOR
+// ══════════════════════════════════════════════════════════════
+class EinkSim {
+    constructor(canvas, scale=2) {
+        this.W = 264; this.H = 176; this.scale = scale;
+        canvas.width  = this.W * scale;
+        canvas.height = this.H * scale;
+        this.ctx = canvas.getContext('2d');
+        this.ctx.scale(scale, scale);
+        this.clear();
+    }
+    clear() {
+        this.ctx.fillStyle='#f2f2ee';
+        this.ctx.fillRect(0,0,this.W,this.H);
+    }
+    col(c){ return c==='white'?'#f2f2ee':'#1a1a1a'; }
+
+    rect(x,y,w,h,o={}) {
+        const c=this.col(o.color);
+        if(o.fill){this.ctx.fillStyle=c;this.ctx.fillRect(x,y,w,h);}
+        else{this.ctx.strokeStyle=c;this.ctx.lineWidth=1;this.ctx.strokeRect(x+.5,y+.5,w-1,h-1);}
+    }
+    circle(cx,cy,r,o={}) {
+        const c=this.col(o.color);
+        this.ctx.beginPath();this.ctx.arc(cx,cy,r,0,Math.PI*2);
+        if(o.fill){this.ctx.fillStyle=c;this.ctx.fill();}
+        else{this.ctx.strokeStyle=c;this.ctx.lineWidth=1;this.ctx.stroke();}
+    }
+    triangle(x0,y0,x1,y1,x2,y2,o={}) {
+        const c=this.col(o.color);
+        this.ctx.beginPath();
+        this.ctx.moveTo(x0,y0);this.ctx.lineTo(x1,y1);this.ctx.lineTo(x2,y2);this.ctx.closePath();
+        if(o.fill){this.ctx.fillStyle=c;this.ctx.fill();}
+        else{this.ctx.strokeStyle=c;this.ctx.lineWidth=1;this.ctx.stroke();}
+    }
+    round_rect(x,y,w,h,r,o={}) {
+        const c=this.col(o.color);
+        this.ctx.beginPath();
+        if(this.ctx.roundRect) this.ctx.roundRect(x,y,w,h,r);
+        else { // fallback
+            this.ctx.moveTo(x+r,y);this.ctx.lineTo(x+w-r,y);
+            this.ctx.arcTo(x+w,y,x+w,y+r,r);this.ctx.lineTo(x+w,y+h-r);
+            this.ctx.arcTo(x+w,y+h,x+w-r,y+h,r);this.ctx.lineTo(x+r,y+h);
+            this.ctx.arcTo(x,y+h,x,y+h-r,r);this.ctx.lineTo(x,y+r);
+            this.ctx.arcTo(x,y,x+r,y,r);this.ctx.closePath();
+        }
+        if(o.fill){this.ctx.fillStyle=c;this.ctx.fill();}
+        else{this.ctx.strokeStyle=c;this.ctx.lineWidth=1;this.ctx.stroke();}
+    }
+    line(x0,y0,x1,y1,col) {
+        this.ctx.beginPath();this.ctx.moveTo(x0+.5,y0+.5);this.ctx.lineTo(x1+.5,y1+.5);
+        this.ctx.strokeStyle=col||'#1a1a1a';this.ctx.lineWidth=1;this.ctx.stroke();
+    }
+    pixel(x,y,o={}) { this.ctx.fillStyle=this.col(o.color);this.ctx.fillRect(x,y,1,1); }
+    text(str,x,by,o={}) {
+        const c=this.col(o.color);
+        const bold=o.font==='bold';
+        this.ctx.font=(bold?'bold ':'')+'9.5px monospace';
+        this.ctx.fillStyle=c;this.ctx.textBaseline='alphabetic';
+        this.ctx.fillText(str,x,by);
+    }
+    lines(tbl,x,y,lh,o={}) { tbl.forEach((l,i)=>this.text(l,x,y+i*lh,o)); }
+    // centering (approximation: 8px avg char width for canvas font)
+    cx_text(str,rx,rw){ return rx+Math.floor((rw-str.length*8)/2); }
+}
+
+// ══════════════════════════════════════════════════════════════
+// ANIMATION MANAGEMENT
+// ══════════════════════════════════════════════════════════════
+let activeTimers = [];
+function stopAnimations() { activeTimers.forEach(clearInterval); activeTimers=[]; }
+function addTimer(fn,ms) { const t=setInterval(fn,ms); activeTimers.push(t); return t; }
+
+// ══════════════════════════════════════════════════════════════
+// SLIDE DEMOS
+// ══════════════════════════════════════════════════════════════
+
+// Slide 2: Layout preview
+let layoutMode = 'zones';
+function showLayout(mode) {
+    layoutMode = mode;
+    document.querySelectorAll('#demo-layout').forEach(()=>{});
+    document.querySelectorAll('[onclick^="showLayout"]').forEach(b=>{
+        b.classList.toggle('on', b.getAttribute('onclick').includes("'"+mode+"'"));
+    });
+    renderLayout(mode);
+}
+function renderLayout(mode) {
+    const canvas = document.getElementById('demo-layout');
+    if(!canvas) return;
+    const s = new EinkSim(canvas);
+    const W=264, H=176;
+    if(mode==='zones') {
+        // Color-coded zones
+        s.rect(0,0,W,29,{fill:true,color:'black'});
+        s.text('HEADER — y:0..28',6,19,{color:'white'});
+
+        s.ctx.fillStyle='rgba(63,185,80,.18)';
+        s.ctx.fillRect(0,29,W,78);
+        s.text('CREATURE ZONE — cx:132  cy:70',24,72,{});
+
+        s.ctx.fillStyle='rgba(88,166,255,.18)';
+        s.ctx.fillRect(0,107,W,46);
+        s.text('STAT BARS — y:108,119,130,141',12,134,{});
+
+        s.line(0,153,W-1,153);
+        s.text('DIVIDER y=153',84,151,{});
+
+        s.ctx.fillStyle='rgba(255,166,87,.2)';
+        s.ctx.fillRect(0,154,W,22);
+        s.text('ACTION BAR — y:154..175',48,169,{});
+    } else {
+        // Actual game screen
+        drawGameScreen(s, 0, {hunger:8,happiness:6,energy:4,health:9,stage:3});
+    }
+}
+
+// Slide 4: Primitives animation — 3×2 grid, one shape per cell
+function animatePrimitives() {
+    stopAnimations();
+    const canvas = document.getElementById('demo-prim');
+    if(!canvas) return;
+    const s = new EinkSim(canvas);
+
+    // Grid dividers: 2 vertical + 1 horizontal
+    s.line(87,0,87,176);
+    s.line(175,0,175,176);
+    s.line(0,87,264,87);
+
+    // Cell labels (top-left of each cell)
+    s.text('rect()',4,9,{});
+    s.text('circle()',92,9,{});
+    s.text('triangle()',180,9,{});
+    s.text('round_rect()',4,96,{});
+    s.text('line()',92,96,{});
+    s.text('text()',180,96,{});
+
+    const steps = [
+        // C1 R1: rect — outline shell
+        ()=>{ s.rect(8,13,70,56,{fill:false}); },
+        // C1 R1: filled inner rect
+        ()=>{ s.rect(18,21,50,40,{fill:true,color:'black'}); },
+        // C1 R1: carve white circle (fill+clear pattern)
+        ()=>{ s.circle(43,41,14,{fill:true,color:'white'}); },
+
+        // C2 R1: circle — outline
+        ()=>{ s.circle(131,48,30,{fill:false}); },
+        // C2 R1: filled circle
+        ()=>{ s.circle(131,48,30,{fill:true,color:'black'}); },
+        // C2 R1: white eyes + mouth → face carved out
+        ()=>{
+            s.circle(120,41,7,{fill:true,color:'white'});
+            s.circle(142,41,7,{fill:true,color:'white'});
+            s.line(122,61,140,61);
+        },
+
+        // C3 R1: triangle — outline
+        ()=>{ s.triangle(219,13,255,70,183,70,{fill:false}); },
+        // C3 R1: triangle filled (inverted, overlapping shows contrast)
+        ()=>{ s.triangle(183,13,255,13,219,70,{fill:true,color:'black'}); },
+
+        // C1 R2: round_rect — outline
+        ()=>{ s.round_rect(8,102,70,56,10,{fill:false}); },
+        // C1 R2: filled round_rect with carved circle
+        ()=>{ s.round_rect(16,110,54,40,8,{fill:true,color:'black'}); s.circle(43,130,12,{fill:true,color:'white'}); },
+
+        // C2 R2: line examples (X + cross)
+        ()=>{
+            s.line(92,102,174,158);
+            s.line(92,158,174,102);
+            s.line(92,130,174,130);
+            s.line(133,102,133,158);
+        },
+
+        // C3 R2: text — white on black, black on white
+        ()=>{
+            s.rect(178,102,84,42,{fill:true,color:'black'});
+            s.text('BOLD WHITE',182,117,{color:'white',font:'bold'});
+            s.text('reg white',182,132,{color:'white'});
+            s.text('black text',182,154,{color:'black'});
+        },
+    ];
+
+    let i=0;
+    function next() {
+        if(i<steps.length){ steps[i++](); if(i<steps.length) activeTimers.push(setTimeout(next,460)); }
+    }
+    next();
+}
+
+// Blob creature for slide 5
+function drawBlob(s, cx, cy, r, frame, happy, sick, sleeping) {
+    s.circle(cx,cy,r+2,{fill:true,color:'black'});
+    s.circle(cx,cy,r,  {fill:true,color:'white'});
+    if(sick) {
+        s.line(cx-7,cy-6,cx-3,cy-2); s.line(cx-3,cy-6,cx-7,cy-2);
+        s.line(cx+3,cy-6,cx+7,cy-2); s.line(cx+7,cy-6,cx+3,cy-2);
+    } else if(sleeping) {
+        s.line(cx-7,cy-4,cx-3,cy-4); s.line(cx+3,cy-4,cx+7,cy-4);
+    } else {
+        s.circle(cx-6,cy-5,3,{fill:true,color:'black'});
+        s.circle(cx+6,cy-5,3,{fill:true,color:'black'});
+        s.circle(cx-4,cy-6,1,{fill:true,color:'white'});
+        s.circle(cx+8,cy-6,1,{fill:true,color:'white'});
+    }
+    if(happy) {
+        s.line(cx-6,cy+7,cx,cy+12); s.line(cx,cy+12,cx+6,cy+7);
+    } else if(!sick&&!sleeping) {
+        s.line(cx-6,cy+12,cx,cy+7); s.line(cx,cy+7,cx+6,cy+12);
+    } else {
+        s.line(cx-4,cy+10,cx+4,cy+10);
+    }
+    const dy=frame===1?-8:6;
+    s.line(cx-(r+2),cy+3,cx-(r+9),cy+dy);
+    s.line(cx+(r+2),cy+3,cx+(r+9),cy+dy);
+}
+
+function showBlob(state, btn) {
+    stopAnimations();
+    document.querySelectorAll('[onclick^="showBlob"]').forEach(b=>b.classList.remove('on'));
+    if(btn) btn.classList.add('on');
+    const canvas = document.getElementById('demo-blob');
+    if(!canvas) return;
+    const s = new EinkSim(canvas);
+    const cx=132, cy=80;
+
+    if(state==='dance') {
+        let frame=0;
+        function drawDance() {
+            const ns = new EinkSim(canvas);
+            drawBlob(ns,cx,cy,22,frame,true,false,false);
+            ns.text('DANCING!',ns.cx_text('DANCING!',0,264),155,{});
+            frame=frame===0?1:0;
+        }
+        drawDance();
+        addTimer(drawDance,400);
+    } else {
+        const happy   = state==='happy';
+        const sick    = state==='sick';
+        const sleeping= state==='sleeping';
+        drawBlob(s,cx,cy,22,0,happy,sick,sleeping);
+        const label = {happy:'😊 Happy',sad:'😢 Sad',sick:'🤒 Sick',sleeping:'😴 Sleeping'}[state]||state;
+        s.text(label,s.cx_text(label,0,264),155,{});
+    }
+}
+
+function buildStageRow() {
+    const row = document.getElementById('stage-row');
+    if(!row||row.children.length>0) return;
+    const stages = [{n:'EGG',r:7},{n:'BABY',r:11},{n:'CHILD',r:15},{n:'TEEN',r:19},{n:'ADULT',r:23}];
+    const scl=2, cw=60, ch=64;
+    stages.forEach(st=>{
+        const cell = document.createElement('div');
+        cell.className='stage-cell';
+        const c=document.createElement('canvas');
+        c.width=cw*scl; c.height=ch*scl;
+        c.style.width=cw+'px'; c.style.height=ch+'px';
+        c.style.borderRadius='3px';
+        c.style.boxShadow='0 2px 8px rgba(0,0,0,.5)';
+        const ctx=c.getContext('2d');
+        ctx.scale(scl,scl);
+        ctx.fillStyle='#f2f2ee'; ctx.fillRect(0,0,cw,ch);
+        const bx=cw/2, by=ch/2-2, r=st.r;
+        // body
+        ctx.beginPath(); ctx.arc(bx,by,r+1.5,0,Math.PI*2); ctx.fillStyle='#1a1a1a'; ctx.fill();
+        ctx.beginPath(); ctx.arc(bx,by,r-0.5,0,Math.PI*2); ctx.fillStyle='#f2f2ee'; ctx.fill();
+        // eyes
+        const er=Math.max(1,Math.round(r*0.18)), ed=Math.max(3,Math.round(r*0.32));
+        ctx.beginPath(); ctx.arc(bx-ed,by-Math.round(r*0.28),er,0,Math.PI*2); ctx.fillStyle='#1a1a1a'; ctx.fill();
+        ctx.beginPath(); ctx.arc(bx+ed,by-Math.round(r*0.28),er,0,Math.PI*2); ctx.fillStyle='#1a1a1a'; ctx.fill();
+        // smile
+        ctx.beginPath();
+        ctx.moveTo(bx-Math.round(r*0.4),by+Math.round(r*0.38));
+        ctx.lineTo(bx,by+Math.round(r*0.58));
+        ctx.lineTo(bx+Math.round(r*0.4),by+Math.round(r*0.38));
+        ctx.strokeStyle='#1a1a1a'; ctx.lineWidth=1; ctx.stroke();
+        // arms
+        ctx.beginPath();
+        ctx.moveTo(bx-(r+1),by+Math.round(r*0.1)); ctx.lineTo(bx-(r+7),by+Math.round(r*0.5));
+        ctx.moveTo(bx+(r+1),by+Math.round(r*0.1)); ctx.lineTo(bx+(r+7),by+Math.round(r*0.5));
+        ctx.strokeStyle='#1a1a1a'; ctx.lineWidth=1.2; ctx.stroke();
+
+        const lbl=document.createElement('div'); lbl.className='stage-cell-label'; lbl.textContent=st.n;
+        cell.appendChild(c); cell.appendChild(lbl);
+        row.appendChild(cell);
+    });
+}
+
+// Slide 6: ASCII animation
+const ASCII_FRAMES=[
+    {label:'IDLE',  art:["  (o_o)  ","  [   ]  ","  /| |\\  "]},
+    {label:'HAPPY', art:["  (^_^)  ","  [   ]  ","  /| |\\  "]},
+    {label:'DANCE1',art:["  \\(^_^)/ ","   |||   ","  /   \\  "]},
+    {label:'DANCE2',art:["  (^_^)  "," \\[   ]/ ","   | |   "]},
+    {label:'SICK',  art:["  (x_x)  ","  [   ]  ","   | |   "]},
+    {label:'SLEEP', art:["  (-_-)  ","  [   ]  ","  /| |\\  "]},
+];
+let asciiPlaying=true;
+let asciiFrameIdx=0;
+
+function renderAsciiFrame(idx) {
+    const canvas=document.getElementById('demo-ascii');
+    if(!canvas) return;
+    const s=new EinkSim(canvas);
+    const f=ASCII_FRAMES[idx%ASCII_FRAMES.length];
+    // Background zone
+    s.rect(0,0,264,15,{fill:true,color:'black'});
+    s.text(f.label,s.cx_text(f.label,0,264),11,{color:'white',font:'bold'});
+    // Character
+    const lh=16, startY=58;
+    f.art.forEach((line,i)=>{
+        s.ctx.font='13px monospace';
+        s.ctx.fillStyle='#1a1a1a';
+        s.ctx.textBaseline='alphabetic';
+        const x=s.cx_text(line,0,264);
+        s.ctx.fillText(line,x,startY+i*lh);
+    });
+    // Stat bar example
+    const bar='HUN [########..]';
+    s.text(bar,s.cx_text(bar,0,264),148,{});
+    const lbl=document.getElementById('ascii-frame-label');
+    if(lbl) lbl.textContent=f.label;
+}
+function toggleAsciiAnim() {
+    asciiPlaying=!asciiPlaying;
+    const btn=document.getElementById('btn-ascii-play');
+    if(btn) btn.textContent=asciiPlaying?'⏸ Pause':'▶ Play';
+    if(asciiPlaying) startAsciiAnim();
+}
+function startAsciiAnim() {
+    renderAsciiFrame(asciiFrameIdx);
+    addTimer(()=>{
+        if(!asciiPlaying) return;
+        asciiFrameIdx=(asciiFrameIdx+1)%ASCII_FRAMES.length;
+        renderAsciiFrame(asciiFrameIdx);
+    },600);
+}
+
+// Slide 13: Game screen
+let gameSel=0;
+function drawBar(s,label,y,val){
+    const W=264;
+    s.text(label,8,y+10,{});
+    s.rect(48,y,W-56,10,{fill:false});
+    const fill=Math.floor(val*(W-58)/10);
+    if(fill>0) s.rect(49,y+1,fill,8,{fill:true,color:'black'});
+}
+function drawActionBar(s,sel){
+    const LBLS=['FEED','PLAY','SLEEP','MED'];
+    for(let i=0;i<4;i++){
+        const bx=i*66, lbl=LBLS[i];
+        const lx=bx+Math.floor((66-lbl.length*8)/2);
+        if(i===sel){
+            s.rect(bx,154,66,22,{fill:true,color:'black'});
+            s.text(lbl,lx,171,{color:'white'});
+        } else {
+            s.rect(bx,154,66,22,{fill:false});
+            s.text(lbl,lx,171,{});
+        }
+    }
+}
+function drawGameScreen(s,sel,pet){
+    const W=264;
+    s.rect(0,0,W,29,{fill:true,color:'black'});
+    s.text('MYPET',8,21,{color:'white',font:'bold'});
+    const stgNames=['EGG','BABY','CHILD','TEEN','ADULT'];
+    const stgN=stgNames[pet.stage]||'?';
+    s.text(stgN,s.cx_text(stgN,80,104),21,{color:'white',font:'bold'});
+    s.text('D15',W-35,21,{color:'white',font:'bold'});
+
+    const cx=132,cy=72,r=24;
+    drawBlob(s,cx,cy,r,0,pet.happiness>=5,pet.health<=3,false);
+
+    drawBar(s,'HUN',108,pet.hunger);
+    drawBar(s,'HAP',119,pet.happiness);
+    drawBar(s,'NRG',130,pet.energy);
+    drawBar(s,'HLT',141,pet.health);
+    s.line(0,153,W-1,153);
+    drawActionBar(s,sel);
+}
+function renderGameScreen(sel) {
+    const canvas=document.getElementById('demo-game');
+    if(!canvas) return;
+    const s=new EinkSim(canvas);
+    drawGameScreen(s,sel,{hunger:8,happiness:7,energy:4,health:9,stage:3});
+}
+function gameSelectAction(n, btn) {
+    gameSel=n;
+    document.querySelectorAll('[onclick^="gameSelectAction"]').forEach(b=>b.classList.remove('on'));
+    if(btn) btn.classList.add('on');
+    renderGameScreen(gameSel);
+}
+
+// ══════════════════════════════════════════════════════════════
+// SLIDE ACTIVATION
+// ══════════════════════════════════════════════════════════════
+// Intro animation — cycles through pet lifecycle stages
+const INTRO_SCENES=[
+    {sel:0,pet:{hunger:3,happiness:3,energy:5,health:9,stage:0}},  // EGG, hungry
+    {sel:0,pet:{hunger:9,happiness:7,energy:8,health:10,stage:1}},  // BABY, just fed, happy
+    {sel:1,pet:{hunger:7,happiness:9,energy:8,health:10,stage:2}},  // CHILD, playing
+    {sel:2,pet:{hunger:6,happiness:6,energy:2,health:9,stage:3}},   // TEEN, sleepy
+    {sel:0,pet:{hunger:9,happiness:9,energy:9,health:10,stage:4}},  // ADULT, thriving
+];
+let introIdx=0;
+function startIntroAnim() {
+    introIdx=0;
+    _drawIntroFrame();
+    addTimer(()=>{ introIdx=(introIdx+1)%INTRO_SCENES.length; _drawIntroFrame(); },1100);
+}
+function _drawIntroFrame() {
+    const canvas=document.getElementById('demo-intro');
+    if(!canvas) return;
+    const sc=INTRO_SCENES[introIdx];
+    const s=new EinkSim(canvas);
+    drawGameScreen(s,sc.sel,sc.pet);
+}
+
+function renderReadyScreen() {
+    const canvas=document.getElementById('demo-ready');
+    if(!canvas) return;
+    const s=new EinkSim(canvas);
+    drawGameScreen(s,0,{hunger:8,happiness:8,energy:7,health:10,stage:3});
+}
+
+function startSlideDemo(n) {
+    stopAnimations();
+    const slide=slides[n];
+    if(!slide) return;
+    // detect by canvas/element id — no index dependency
+    if(slide.querySelector('#demo-intro'))  { startIntroAnim(); return; }
+    if(slide.querySelector('#demo-layout')) { showLayout(layoutMode); return; }
+    if(slide.querySelector('#demo-prim'))   { setTimeout(animatePrimitives,150); return; }
+    if(slide.querySelector('#demo-blob'))   { showBlob('happy',document.querySelector('[onclick="showBlob(\'happy\',this)"]')); buildStageRow(); return; }
+    if(slide.querySelector('#demo-ascii'))  { asciiPlaying=true; const b=document.getElementById('btn-ascii-play'); if(b) b.textContent='⏸ Pause'; setTimeout(startAsciiAnim,150); return; }
+    if(slide.querySelector('#demo-game'))   { renderGameScreen(gameSel); return; }
+    if(slide.querySelector('#demo-ready'))  { renderReadyScreen(); return; }
+}
+
+// Initialize demos for first-load visible slides
+updateUI();
+startSlideDemo(0);
+
+// ══════════════════════════════════════════════════════════════
+// LUA SYNTAX HIGHLIGHTER
+// ══════════════════════════════════════════════════════════════
+(function(){
+    const KWS=new Set(['local','function','end','if','then','else','elseif',
+        'while','for','do','return','and','or','not','in','repeat','until','break']);
+    const BOOLS=new Set(['true','false','nil']);
+    function esc(s){return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+    function hlLine(line){
+        let out='',i=0;
+        while(i<line.length){
+            if(line[i]==='-'&&line[i+1]==='-'){
+                out+='<span class="cmt">'+esc(line.slice(i))+'</span>'; return out;
+            }
+            if(line[i]==='"'||line[i]==="'"){
+                const q=line[i]; let j=i+1;
+                while(j<line.length&&line[j]!==q){if(line[j]==='\\')j++;j++;}
+                out+='<span class="str">'+esc(line.slice(i,j<line.length?j+1:line.length))+'</span>';
+                i=j<line.length?j+1:line.length; continue;
+            }
+            if(/[a-zA-Z_]/.test(line[i])){
+                let j=i; while(j<line.length&&/[a-zA-Z0-9_]/.test(line[j]))j++;
+                const word=line.slice(i,j);
+                if(line[j]==='.'&&word==='onion'){
+                    let k=j+1; while(k<line.length&&/[a-zA-Z0-9_]/.test(line[k]))k++;
+                    out+='<span class="api">onion.'+esc(line.slice(j+1,k))+'</span>';
+                    i=k; continue;
+                }
+                if(line[j]==='.'&&(word==='math'||word==='string'||word==='table')){
+                    let k=j+1; while(k<line.length&&/[a-zA-Z0-9_]/.test(line[k]))k++;
+                    out+='<span class="fn">'+esc(word+'.'+line.slice(j+1,k))+'</span>';
+                    i=k; continue;
+                }
+                if(KWS.has(word)) out+='<span class="kw">'+esc(word)+'</span>';
+                else if(BOOLS.has(word)) out+='<span class="bl">'+esc(word)+'</span>';
+                else{
+                    let k=j; while(k<line.length&&line[k]===' ')k++;
+                    out+=(k<line.length&&line[k]==='(')?'<span class="fn">'+esc(word)+'</span>':esc(word);
+                }
+                i=j; continue;
+            }
+            if(/[0-9]/.test(line[i])){
+                let j=i; while(j<line.length&&/[0-9._xA-Fa-f]/.test(line[j]))j++;
+                out+='<span class="num">'+esc(line.slice(i,j))+'</span>'; i=j; continue;
+            }
+            out+=esc(line[i]); i++;
+        }
+        return out;
+    }
+    function hlJson(code){
+        return esc(code)
+            .replace(/"([^"]+)"(\s*:)/g,'<span class="fn">"$1"</span>$2')
+            .replace(/:\s*"([^"]*)"/g,': <span class="str">"$1"</span>')
+            .replace(/:\s*(\d+)/g,': <span class="num">$1</span>')
+            .replace(/:\s*(true|false|null)/g,': <span class="bl">$1</span>');
+    }
+    document.querySelectorAll('pre.lua code').forEach(el=>{ el.innerHTML=el.textContent.split('\n').map(hlLine).join('\n'); });
+    document.querySelectorAll('pre.json code').forEach(el=>{ el.innerHTML=hlJson(el.textContent); });
+})();
+</script>
+</body>
+</html>
